@@ -10,12 +10,12 @@ import os
 # Add the parent directory to sys.path to allow importing from UI package
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from UI.dicom_converter import DicomConverter
-from UI.dataset_cleaner import FabellaCleaner
-from UI.obb_labeler import OBBLabeler
-from UI.yolo_preparer import YoloPreparer
-from UI.yolo_trainer import YoloTrainer
-from UI.yolo_tester import YoloTester
+from dicom_converter import DicomConverter
+from dataset_cleaner import FabellaCleaner
+from obb_labeler import OBBLabeler
+from yolo_preparer import YoloPreparer
+from yolo_trainer import YoloTrainer
+from yolo_tester import YoloTester
 
 # Colors
 BG_COLOR = "#1E1E1E"
