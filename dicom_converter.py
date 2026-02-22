@@ -4,6 +4,7 @@ import numpy as np
 import cv2
 import os
 import sys
+import torch
 
 class DicomConverter:
     # A class to handle the conversion of DICOM images to 16-bit PNG format.
@@ -54,14 +55,29 @@ class DicomConverter:
         total_files = len(dicom_files)
         
         print(f"Found {total_files} DICOM files. Starting conversion...")
+        
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if device.type == "cuda":
+            print("Using GPU for image processing.")
+        else:
+            print("Using CPU for image processing.")
 
         for i, filename in enumerate(dicom_files):
             try:
                 ds = pydicom.dcmread(os.path.join(dicom_path, filename))
                 img = ds.pixel_array.astype(float)
+                
+                # Move to GPU if available
+                if device.type == "cuda":
+                    img_tensor = torch.from_numpy(img).to(device)
+                else:
+                    img_tensor = img
 
                 if 'RescaleIntercept' in ds and 'RescaleSlope' in ds:
-                    img = img * ds.RescaleSlope + ds.RescaleIntercept
+                    if device.type == "cuda":
+                        img_tensor = img_tensor * ds.RescaleSlope + ds.RescaleIntercept
+                    else:
+                        img_tensor = img_tensor * ds.RescaleSlope + ds.RescaleIntercept
 
                 if 'WindowCenter' in ds and 'WindowWidth' in ds:
                     wc = ds.WindowCenter
@@ -71,11 +87,23 @@ class DicomConverter:
                     img_min = float(wc) - float(ww) // 2
                     img_max = float(wc) + float(ww) // 2
                 else:
-                    img_min = np.percentile(img, 1)
-                    img_max = np.percentile(img, 99)
+                    if device.type == "cuda":
+                        # PyTorch doesn't have a direct percentile function for 2D tensors that works exactly like numpy's
+                        # We can approximate or move back to CPU for this step if needed, but for speed, let's use quantile
+                        img_flat = img_tensor.flatten()
+                        img_min = torch.quantile(img_flat, 0.01).item()
+                        img_max = torch.quantile(img_flat, 0.99).item()
+                    else:
+                        img_min = np.percentile(img_tensor, 1)
+                        img_max = np.percentile(img_tensor, 99)
 
-                img = np.clip(img, img_min, img_max)
-                img = ((img - img_min) / (img_max - img_min) * 65535.0).astype(np.uint16)
+                if device.type == "cuda":
+                    img_tensor = torch.clamp(img_tensor, img_min, img_max)
+                    img_tensor = ((img_tensor - img_min) / (img_max - img_min) * 65535.0).to(torch.int32) # Use int32 before converting to numpy uint16
+                    img = img_tensor.cpu().numpy().astype(np.uint16)
+                else:
+                    img_tensor = np.clip(img_tensor, img_min, img_max)
+                    img = ((img_tensor - img_min) / (img_max - img_min) * 65535.0).astype(np.uint16)
 
                 if ds.PhotometricInterpretation == "MONOCHROME1":
                     img = 65535 - img
