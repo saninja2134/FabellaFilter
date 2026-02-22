@@ -1,6 +1,4 @@
-"""
-Module for testing the trained YOLO model.
-"""
+# Module for testing the trained YOLO model.
 import cv2
 import numpy as np
 from ultralytics import YOLO
@@ -8,31 +6,23 @@ import os
 import shutil
 
 class YoloTester:
-    """
-    A class to handle testing the trained YOLO model on a dataset.
-    """
+    # A class to handle testing the trained YOLO model on a dataset.
     def __init__(self, model_path="runs/obb/fabella_obb_v12/weights/best.pt", src_dir="dataset_png/pos", sorted_dir="dataset_sorted/pos", output_dir="test_output"):
-        """
-        Initializes the YoloTester.
-        
-        Args:
-            model_path (str): Path to the trained YOLO model weights.
-            src_dir (str): Directory containing source images for testing.
-            sorted_dir (str): Directory containing sorted images to exclude from testing.
-            output_dir (str): Directory to save test results.
-        """
+        # Initializes the YoloTester.
+        # Args:
+        # model_path (str): Path to the trained YOLO model weights.
+        # src_dir (str): Directory containing source images for testing.
+        # sorted_dir (str): Directory containing sorted images to exclude from testing.
+        # output_dir (str): Directory to save test results.
         self.model_path = model_path
         self.src_dir = src_dir
         self.sorted_dir = sorted_dir
         self.output_dir = output_dir
 
     def run_test(self, progress_callback=None):
-        """
-        Runs the test process using the trained YOLO model.
-        
-        Args:
-            progress_callback (callable, optional): A function to call with progress updates.
-        """
+        # Runs the test process using the trained YOLO model.
+        # Args:
+        # progress_callback (callable, optional): A function to call with progress updates.
         def log(msg):
             print(msg)
             if progress_callback: progress_callback(msg)

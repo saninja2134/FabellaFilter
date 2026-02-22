@@ -1,22 +1,16 @@
-"""
-Module for labeling images with Oriented Bounding Boxes (OBB).
-"""
+# Module for labeling images with Oriented Bounding Boxes (OBB).
 import cv2
 import os
 import numpy as np
 
 class OBBLabeler:
-    """
-    An OpenCV-based tool for annotating images with OBBs.
-    """
+    # An OpenCV-based tool for annotating images with OBBs.
     def __init__(self, image_dir="dataset_sorted/pos", label_dir="labels/pos"):
-        """
-        Initializes the OBBLabeler.
-        
-        Args:
-            image_dir (str): Directory containing images to label.
-            label_dir (str): Directory to save the labels.
-        """
+        # Initializes the OBBLabeler.
+        # 
+        # Args:
+        # image_dir (str): Directory containing images to label.
+        # label_dir (str): Directory to save the labels.
         self.image_dir = image_dir
         self.label_dir = label_dir
         
@@ -42,7 +36,7 @@ class OBBLabeler:
         self.last_mouse = [0, 0]
 
     def mouse_callback(self, event, x, y, flags, param):
-        """Handles mouse events for drawing, panning, and zooming."""
+        # Handles mouse events for drawing, panning, and zooming.
         # Convert screen x,y to image x,y
         img_x = (x - self.offset[0]) / (self.zoom_level if self.zoom_level > 0 else 0.001)
         img_y = (y - self.offset[1]) / (self.zoom_level if self.zoom_level > 0 else 0.001)
@@ -79,7 +73,7 @@ class OBBLabeler:
             self.redraw()
 
     def get_obb_coords(self, p1, p2, p3):
-        """Calculates the 4 corners of the OBB given 3 points."""
+        # Calculates the 4 corners of the OBB given 3 points.
         dx = p2[0] - p1[0]
         dy = p2[1] - p1[1]
         length = np.sqrt(dx**2 + dy**2)
@@ -94,7 +88,7 @@ class OBBLabeler:
                 (p1[0] + dist * vx, p1[1] + dist * vy)]
 
     def redraw(self):
-        """Redraws the image and annotations on the canvas."""
+        # Redraws the image and annotations on the canvas.
         if self.display_src is None: return
         
         canvas_h, canvas_w = 950, 1400
@@ -153,7 +147,7 @@ class OBBLabeler:
         cv2.imshow(self.window_name, display)
 
     def save_label(self):
-        """Saves the current OBB label to a text file."""
+        # Saves the current OBB label to a text file.
         if len(self.points) != 3 or self.current_image is None: return
         coords = self.get_obb_coords(*self.points)
         if coords is None: return
@@ -169,7 +163,7 @@ class OBBLabeler:
         print(f"Saved: {txt_name}")
 
     def run(self):
-        """Starts the labeling session."""
+        # Starts the labeling session.
         if not self.images:
             print(f"No images found in {self.image_dir}")
             return

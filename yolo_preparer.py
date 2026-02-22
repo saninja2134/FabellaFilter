@@ -1,6 +1,4 @@
-"""
-Module for preparing the dataset for YOLO training.
-"""
+# Module for preparing the dataset for YOLO training.
 import os
 import shutil
 import random
@@ -10,35 +8,28 @@ import cv2
 from sklearn.model_selection import train_test_split
 
 class YoloPreparer:
-    """
-    A class to prepare and split the dataset for YOLO model training.
-    """
+    # A class to prepare and split the dataset for YOLO model training.
     def __init__(self, pos_img_dir="dataset_sorted/pos", label_dir="labels/pos", neg_dicom_dir="neg", base_output="yolo_dataset"):
-        """
-        Initializes the YoloPreparer.
-        
-        Args:
-            pos_img_dir (str): Directory containing positive images.
-            label_dir (str): Directory containing labels.
-            neg_dicom_dir (str): Directory containing negative DICOM images.
-            base_output (str): Output directory for the YOLO dataset.
-        """
+        # Initializes the YoloPreparer.
+        # Args:
+        # pos_img_dir (str): Directory containing positive images.
+        # label_dir (str): Directory containing labels.
+        # neg_dicom_dir (str): Directory containing negative DICOM images.
+        # base_output (str): Output directory for the YOLO dataset.
         self.pos_img_dir = pos_img_dir
         self.label_dir = label_dir
         self.neg_dicom_dir = neg_dicom_dir
         self.base_output = base_output
 
     def convert_dicom_to_16bit_png(self, src_path, dst_path):
-        """
-        Converts a single DICOM file to a 16-bit PNG.
-        
-        Args:
-            src_path (str): Path to the source DICOM file.
-            dst_path (str): Path to save the converted PNG file.
-            
-        Returns:
-            bool: True if successful, False otherwise.
-        """
+        # Converts a single DICOM file to a 16-bit PNG.
+        # 
+        # Args:
+        # src_path (str): Path to the source DICOM file.
+        # dst_path (str): Path to save the converted PNG file.
+        #     
+        # Returns:
+        # bool: True if successful, False otherwise.
         try:
             ds = pydicom.dcmread(src_path)
             img = ds.pixel_array.astype(float)
@@ -70,13 +61,11 @@ class YoloPreparer:
             return False
 
     def setup_dataset(self, progress_callback=None):
-        """
-        Prepares the dataset by gathering positive samples, sampling negative samples,
-        splitting into train/val sets, and creating the data.yaml file.
-        
-        Args:
-            progress_callback (callable, optional): A function to call with progress updates.
-        """
+        # Prepares the dataset by gathering positive samples, sampling negative samples,
+        # splitting into train/val sets, and creating the data.yaml file.
+        # 
+        # Args:
+        # progress_callback (callable, optional): A function to call with progress updates.
         def log(msg):
             print(msg)
             if progress_callback: progress_callback(msg)

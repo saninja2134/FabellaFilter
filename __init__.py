@@ -1,3 +1,1 @@
-"""
-UI Package initialization.
-"""
+# UI Package initialization.

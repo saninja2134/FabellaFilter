@@ -1,6 +1,4 @@
-"""
-Main application module that integrates all tools into a single UI.
-"""
+# Main application module that integrates all tools into a single UI.
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
@@ -25,16 +23,11 @@ BUTTON_ACTIVE = "#444444"
 ACCENT_COLOR = "#007ACC"  # VS Code Blue for accent
 
 class FabellaApp:
-    """
-    The main application class for the Fabella Dataset Manager.
-    """
+    # The main application class for the Fabella Dataset Manager.
     def __init__(self, root):
-        """
-        Initializes the FabellaApp.
-        
-        Args:
-            root (tk.Tk): The root Tkinter window.
-        """
+        # Initializes the FabellaApp.
+        # Args:
+        # root (tk.Tk): The root Tkinter window.
         self.root = root
         self.root.title("Fabella Dataset Manager")
         self.root.geometry("600x600")
@@ -100,22 +93,22 @@ class FabellaApp:
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
 
     def log(self, message):
-        """Appends a message to the log text area."""
+        # Appends a message to the log text area.
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
         self.root.update_idletasks()
 
     def set_status(self, message):
-        """Updates the status bar text."""
+        # Updates the status bar text.
         self.status_bar.config(text=message)
         self.root.update_idletasks()
 
     def heading(self, parent, text):
-        """Creates a heading label."""
+        # Creates a heading label.
         return tk.Label(parent, text=text, font=("Segoe UI", 12, "bold"), bg=BG_COLOR, fg=ACCENT_COLOR)
 
     def create_action_button(self, parent, text, description, command, color=BUTTON_BG):
-        """Creates an action button with a description."""
+        # Creates an action button with a description.
         frame = tk.Frame(parent, bg=BG_COLOR, pady=5)
         frame.pack(fill=tk.X)
         
@@ -147,7 +140,7 @@ class FabellaApp:
         return btn
 
     def setup_dataset_tab(self):
-        """Sets up the Dataset Tools tab."""
+        # Sets up the Dataset Tools tab.
         container = tk.Frame(self.tab_dataset, bg=BG_COLOR, padx=20, pady=20)
         container.pack(fill=tk.BOTH, expand=True)
 
@@ -186,7 +179,7 @@ class FabellaApp:
         )
 
     def setup_model_tab(self):
-        """Sets up the Model Training tab."""
+        # Sets up the Model Training tab.
         container = tk.Frame(self.tab_model, bg=BG_COLOR, padx=20, pady=20)
         container.pack(fill=tk.BOTH, expand=True)
 
@@ -211,7 +204,7 @@ class FabellaApp:
         )
 
     def run_in_thread(self, target, status_msg):
-        """Runs a target function in a separate thread to keep UI responsive."""
+        # Runs a target function in a separate thread to keep UI responsive.
         def wrapper():
             self.set_status(status_msg)
             try:
@@ -227,18 +220,18 @@ class FabellaApp:
         thread.start()
 
     def run_dicom_conversion(self):
-        """Runs the DICOM to PNG conversion process."""
+        # Runs the DICOM to PNG conversion process.
         converter = DicomConverter()
         self.run_in_thread(lambda: converter.run_conversion(progress_callback=self.log), "Converting DICOM files...")
 
     def run_cleaner(self):
-        """Opens the Dataset Cleaner window."""
+        # Opens the Dataset Cleaner window.
         self.set_status("Opening Dataset Cleaner...")
         cleaner_window = FabellaCleaner(self.root)
         self.set_status("Ready")
 
     def run_labeler(self):
-        """Runs the OBB Labeler tool."""
+        # Runs the OBB Labeler tool.
         self.set_status("Opening OBB Labeler...")
         labeler = OBBLabeler()
         # Run in main thread as it uses OpenCV GUI which needs to be in main thread
@@ -251,17 +244,17 @@ class FabellaApp:
             messagebox.showerror("Error", str(e))
         
     def run_prepare_yolo(self):
-        """Runs the YOLO dataset preparation process."""
+        # Runs the YOLO dataset preparation process.
         preparer = YoloPreparer()
         self.run_in_thread(lambda: preparer.setup_dataset(progress_callback=self.log), "Preparing YOLO dataset...")
 
     def run_train_yolo(self):
-        """Runs the YOLO model training process."""
+        # Runs the YOLO model training process.
         trainer = YoloTrainer()
         self.run_in_thread(lambda: trainer.train_fabella(progress_callback=self.log), "Training YOLO model...")
 
     def run_test_model(self):
-        """Runs the YOLO model testing process."""
+        # Runs the YOLO model testing process.
         tester = YoloTester()
         self.run_in_thread(lambda: tester.run_test(progress_callback=self.log), "Testing YOLO model...")
 

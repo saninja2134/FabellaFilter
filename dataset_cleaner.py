@@ -1,6 +1,4 @@
-"""
-Module for cleaning and sorting the dataset.
-"""
+# Module for cleaning and sorting the dataset.
 import os
 import shutil
 import tkinter as tk
@@ -18,20 +16,16 @@ BUTTON_BG = "#333333"
 BUTTON_ACTIVE = "#444444"
 
 class FabellaCleaner(tk.Toplevel):
-    """
-    A Tkinter Toplevel window for sorting images into keep/discard categories.
-    """
+    # A Tkinter Toplevel window for sorting images into keep/discard categories.
     def __init__(self, parent, input_base="dataset_png", output_base="dataset_sorted", discard_base="dataset_discarded", category="pos"):
-        """
-        Initializes the FabellaCleaner window.
-        
-        Args:
-            parent (tk.Tk or tk.Toplevel): The parent window.
-            input_base (str): The base directory containing input images.
-            output_base (str): The base directory to save kept images.
-            discard_base (str): The base directory to save discarded images.
-            category (str): The category to process (e.g., 'pos' or 'neg').
-        """
+        # Initializes the FabellaCleaner window.
+        # 
+        # Args:
+        # parent (tk.Tk or tk.Toplevel): The parent window.
+        # input_base (str): The base directory containing input images.
+        # output_base (str): The base directory to save kept images.
+        # discard_base (str): The base directory to save discarded images.
+        # category (str): The category to process (e.g., 'pos' or 'neg').
         super().__init__(parent)
         self.title("Fabella Dataset Cleaner")
         self.geometry("1000x900")
@@ -80,11 +74,12 @@ class FabellaCleaner(tk.Toplevel):
             messagebox.showinfo("Done", f"No images found in {self.input_dir}", parent=self)
             self.destroy()
             return
-            
+        
+        self.update_idletasks() # Forces Tkinter to calculate true window dimensions
         self.show_image()
 
     def setup_ui(self):
-        """Sets up the user interface elements."""
+        # Sets up the user interface elements.
         # Header / Status
         self.header_frame = tk.Frame(self, bg=BG_COLOR)
         self.header_frame.pack(fill=tk.X, padx=20, pady=15)
@@ -180,7 +175,7 @@ class FabellaCleaner(tk.Toplevel):
         self.footer_label.pack(pady=(0, 15))
 
     def create_button(self, parent, text, bg_color, command):
-        """Creates a styled button."""
+        # Creates a styled button.
         btn = tk.Button(
             parent,
             text=text,
@@ -197,7 +192,7 @@ class FabellaCleaner(tk.Toplevel):
         return btn
 
     def bind_keys(self):
-        """Binds keyboard and mouse events."""
+        # Binds keyboard and mouse events.
         self.bind("<Right>", lambda e: self.keep_current())
         self.bind("<Left>", lambda e: self.discard_current())
         self.bind("<Control-z>", lambda e: self.undo_last())
@@ -209,7 +204,7 @@ class FabellaCleaner(tk.Toplevel):
         self.canvas.bind("<B1-Motion>", self.pan)
 
     def update_status(self):
-        """Updates the status labels."""
+        # Updates the status labels.
         self.count_label.config(text=f"{self.processed_count} processed | {len(self.image_files)} remaining")
         
         if self.image_files:
@@ -219,7 +214,7 @@ class FabellaCleaner(tk.Toplevel):
             self.filename_label.config(text="No more images")
 
     def show_image(self):
-        """Displays the current image on the canvas."""
+        # Displays the current image on the canvas.
         if not self.image_files:
             messagebox.showinfo("Complete", "All images have been sorted!", parent=self)
             self.destroy()
@@ -248,19 +243,19 @@ class FabellaCleaner(tk.Toplevel):
             self.show_image()
 
     def reset_zoom_vars(self):
-        """Resets zoom and pan variables."""
+        # Resets zoom and pan variables.
         self.zoom_scale = 1.0
         self.pan_x = 0
         self.pan_y = 0
         self.zoom_info_label.config(text="Zoom: 100%")
 
     def reset_zoom(self):
-        """Resets the view to default zoom and pan."""
+        # Resets the view to default zoom and pan.
         self.reset_zoom_vars()
         self.redraw_image()
 
     def zoom(self, event):
-        """Handles mouse wheel zoom events."""
+        # Handles mouse wheel zoom events.
         if self.original_image_cv is None:
             return
             
@@ -275,12 +270,12 @@ class FabellaCleaner(tk.Toplevel):
             self.redraw_image()
 
     def start_pan(self, event):
-        """Records the starting position for panning."""
+        # Records the starting position for panning.
         self.pan_start_x = event.x
         self.pan_start_y = event.y
 
     def pan(self, event):
-        """Handles mouse drag panning events."""
+        # Handles mouse drag panning events.
         if self.original_image_cv is None:
             return
             
@@ -296,7 +291,7 @@ class FabellaCleaner(tk.Toplevel):
         self.redraw_image()
 
     def redraw_image(self):
-        """Redraws the image on the canvas with current zoom and pan."""
+        # Redraws the image on the canvas with current zoom and pan.
         if self.original_image_cv is None:
             return
             
@@ -334,7 +329,7 @@ class FabellaCleaner(tk.Toplevel):
         self.canvas.create_image(center_x, center_y, anchor=tk.CENTER, image=self.tk_img)
 
     def move_file(self, destination):
-        """Moves the current file to the specified destination."""
+        # Moves the current file to the specified destination.
         if not self.image_files:
             return
             
@@ -352,15 +347,15 @@ class FabellaCleaner(tk.Toplevel):
             messagebox.showerror("Error", f"Failed to move file: {e}", parent=self)
 
     def keep_current(self):
-        """Moves the current image to the keep directory."""
+        # Moves the current image to the keep directory.
         self.move_file(self.output_dir)
 
     def discard_current(self):
-        """Moves the current image to the discard directory."""
+        # Moves the current image to the discard directory.
         self.move_file(self.discard_dir)
         
     def undo_last(self):
-        """Undoes the last move operation."""
+        # Undoes the last move operation.
         if not self.history:
             return
             

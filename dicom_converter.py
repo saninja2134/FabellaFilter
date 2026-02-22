@@ -1,6 +1,4 @@
-"""
-Module for converting DICOM files to PNG format.
-"""
+# Module for converting DICOM files to PNG format.
 import pydicom
 import numpy as np
 import cv2
@@ -8,24 +6,18 @@ import os
 import sys
 
 class DicomConverter:
-    """
-    A class to handle the conversion of DICOM images to 16-bit PNG format.
-    """
+    # A class to handle the conversion of DICOM images to 16-bit PNG format.
     def __init__(self, base_dir=".", output_base="dataset_png"):
-        """
-        Initializes the DicomConverter.
-        
-        Args:
-            base_dir (str): The base directory containing 'neg' and 'pos' folders.
-            output_base (str): The base directory to save the converted PNGs.
-        """
+        # Initializes the DicomConverter.
+        # 
+        # Args:
+        #     base_dir (str): The base directory containing 'neg' and 'pos' folders.
+        #     output_base (str): The base directory to save the converted PNGs.
         self.base_dir = base_dir
         self.output_base = output_base
 
     def check_dependencies(self):
-        """
-        Checks for required DICOM decompression handlers.
-        """
+        # Checks for required DICOM decompression handlers.
         print(f"Running with Python: {sys.executable}")
         handlers = []
         try:
@@ -48,14 +40,12 @@ class DicomConverter:
             print(f"Detected handlers: {', '.join(handlers)}")
 
     def convert_to_bone_png(self, dicom_path, output_folder, progress_callback=None):
-        """
-        Converts DICOM files in a directory to PNG.
-        
-        Args:
-            dicom_path (str): Path to the directory containing DICOM files.
-            output_folder (str): Path to the directory to save PNG files.
-            progress_callback (callable, optional): A function to call with progress updates.
-        """
+        # Converts DICOM files in a directory to PNG.
+        # 
+        # Args:
+        #     dicom_path (str): Path to the directory containing DICOM files.
+        #     output_folder (str): Path to the directory to save PNG files.
+        #     progress_callback (callable, optional): A function to call with progress updates.
         self.check_dependencies()
         if not os.path.exists(output_folder):
             os.makedirs(output_folder)
@@ -104,12 +94,10 @@ class DicomConverter:
         print("Conversion complete!")
 
     def run_conversion(self, progress_callback=None):
-        """
-        Runs the conversion for both 'neg' and 'pos' folders.
-        
-        Args:
-            progress_callback (callable, optional): A function to call with progress updates.
-        """
+        # Runs the conversion for both 'neg' and 'pos' folders.
+        # 
+        # Args:
+        #     progress_callback (callable, optional): A function to call with progress updates.
         for category in ["neg", "pos"]:
             input_folder = os.path.join(self.base_dir, category)
             output_folder = os.path.join(self.output_base, category)

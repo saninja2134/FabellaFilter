@@ -1,26 +1,19 @@
-"""
-Module for training the YOLO model.
-"""
+# Module for training the YOLO model.
 from ultralytics import YOLO
 import torch
 import os
 
 class YoloTrainer:
-    """
-    A class to handle the training of the YOLO model.
-    """
+    # A class to handle the training of the YOLO model.
     def __init__(self, data_yaml="data.yaml", model_name="yolo12n-obb.pt", fallback_model="yolo11n-obb.pt", epochs=100, imgsz=1024, batch=4):
-        """
-        Initializes the YoloTrainer.
-        
-        Args:
-            data_yaml (str): Path to the data configuration file.
-            model_name (str): Name of the primary YOLO model to use.
-            fallback_model (str): Name of the fallback YOLO model.
-            epochs (int): Number of training epochs.
-            imgsz (int): Image size for training.
-            batch (int): Batch size for training.
-        """
+        # Initializes the YoloTrainer.
+        # Args:
+        # data_yaml (str): Path to the data configuration file.
+        # model_name (str): Name of the primary YOLO model to use.
+        # fallback_model (str): Name of the fallback YOLO model.
+        # epochs (int): Number of training epochs.
+        # imgsz (int): Image size for training.
+        # batch (int): Batch size for training.
         self.data_yaml = data_yaml
         self.model_name = model_name
         self.fallback_model = fallback_model
@@ -29,12 +22,9 @@ class YoloTrainer:
         self.batch = batch
 
     def train_fabella(self, progress_callback=None):
-        """
-        Starts the training process for the YOLO model.
-        
-        Args:
-            progress_callback (callable, optional): A function to call with progress updates.
-        """
+        # Starts the training process for the YOLO model.
+        # Args:
+        # progress_callback (callable, optional): A function to call with progress updates.
         def log(msg):
             print(msg)
             if progress_callback: progress_callback(msg)
