@@ -5,6 +5,7 @@ import cv2
 import os
 import sys
 import torch
+import csv
 
 class DicomConverter:
     # A class to handle the conversion of DICOM images to 16-bit PNG format.
@@ -62,6 +63,8 @@ class DicomConverter:
         else:
             print("Using CPU for image processing.")
 
+        demographics = []
+
         for i, filename in enumerate(dicom_files):
             try:
                 ds = pydicom.dcmread(os.path.join(dicom_path, filename))
@@ -111,6 +114,21 @@ class DicomConverter:
                 png_name = os.path.splitext(filename)[0] + ".png"
                 cv2.imwrite(os.path.join(output_folder, png_name), img)
                 
+                # Extract demographic data
+                demo_data = {
+                    'FileName': png_name,
+                    'PatientID': str(getattr(ds, 'PatientID', 'UNKNOWN')),
+                    'PatientName': str(getattr(ds, 'PatientName', 'UNKNOWN')),
+                    'PatientAge': str(getattr(ds, 'PatientAge', 'UNKNOWN')),
+                    'PatientSex': str(getattr(ds, 'PatientSex', 'UNKNOWN')),
+                    'StudyDate': str(getattr(ds, 'StudyDate', 'UNKNOWN')),
+                    'StudyDescription': str(getattr(ds, 'StudyDescription', 'UNKNOWN')),
+                    'Modality': str(getattr(ds, 'Modality', 'UNKNOWN')),
+                    'BodyPartExamined': str(getattr(ds, 'BodyPartExamined', 'UNKNOWN')),
+                    'Manufacturer': str(getattr(ds, 'Manufacturer', 'UNKNOWN'))
+                }
+                demographics.append(demo_data)
+                
                 if progress_callback:
                     progress_callback(f"Converted {i+1}/{total_files}: {filename}")
                 
@@ -120,12 +138,14 @@ class DicomConverter:
                     progress_callback(f"Error converting {filename}: {e}")
 
         print("Conversion complete!")
+        return demographics
 
     def run_conversion(self, progress_callback=None):
         # Runs the conversion for both 'neg' and 'pos' folders.
         # 
         # Args:
         #     progress_callback (callable, optional): A function to call with progress updates.
+        all_demographics = []
         for category in ["neg", "pos"]:
             input_folder = os.path.join(self.base_dir, category)
             output_folder = os.path.join(self.output_base, category)
@@ -134,8 +154,26 @@ class DicomConverter:
                 msg = f"\nProcessing {category} folder..."
                 print(msg)
                 if progress_callback: progress_callback(msg)
-                self.convert_to_bone_png(input_folder, output_folder, progress_callback)
+                category_demographics = self.convert_to_bone_png(input_folder, output_folder, progress_callback)
+                if category_demographics:
+                    all_demographics.extend(category_demographics)
             else:
                 msg = f"\nSkipping {category} - folder not found."
+                print(msg)
+                if progress_callback: progress_callback(msg)
+
+        if all_demographics:
+            csv_path = os.path.join(self.output_base, "demographics.csv")
+            try:
+                keys = all_demographics[0].keys()
+                with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.DictWriter(f, fieldnames=keys)
+                    writer.writeheader()
+                    writer.writerows(all_demographics)
+                msg = f"\nDemographics saved to {csv_path}"
+                print(msg)
+                if progress_callback: progress_callback(msg)
+            except Exception as e:
+                msg = f"\nError saving demographics to CSV: {e}"
                 print(msg)
                 if progress_callback: progress_callback(msg)
