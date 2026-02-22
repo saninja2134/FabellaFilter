@@ -120,12 +120,25 @@ class DicomConverter:
                     'PatientID': str(getattr(ds, 'PatientID', 'UNKNOWN')),
                     'PatientName': str(getattr(ds, 'PatientName', 'UNKNOWN')),
                     'PatientAge': str(getattr(ds, 'PatientAge', 'UNKNOWN')),
+                    'PatientBirthDate': str(getattr(ds, 'PatientBirthDate', 'UNKNOWN')),
                     'PatientSex': str(getattr(ds, 'PatientSex', 'UNKNOWN')),
+                    'PatientAddress': str(getattr(ds, 'PatientAddress', 'UNKNOWN')),
+                    'EthnicGroup': str(getattr(ds, 'EthnicGroup', 'UNKNOWN')),
+                    'OtherPatientIDs': str(getattr(ds, 'OtherPatientIDs', 'UNKNOWN')),
+                    'IssuerOfPatientID': str(getattr(ds, 'IssuerOfPatientID', 'UNKNOWN')),
+                    'CurrentPatientLocation': str(getattr(ds, 'CurrentPatientLocation', 'UNKNOWN')),
                     'StudyDate': str(getattr(ds, 'StudyDate', 'UNKNOWN')),
+                    'StudyTime': str(getattr(ds, 'StudyTime', 'UNKNOWN')),
                     'StudyDescription': str(getattr(ds, 'StudyDescription', 'UNKNOWN')),
                     'Modality': str(getattr(ds, 'Modality', 'UNKNOWN')),
                     'BodyPartExamined': str(getattr(ds, 'BodyPartExamined', 'UNKNOWN')),
-                    'Manufacturer': str(getattr(ds, 'Manufacturer', 'UNKNOWN'))
+                    'Laterality': str(getattr(ds, 'Laterality', 'UNKNOWN')),
+                    'ViewPosition': str(getattr(ds, 'ViewPosition', 'UNKNOWN')),
+                    'ReferringPhysicianName': str(getattr(ds, 'ReferringPhysicianName', 'UNKNOWN')),
+                    'RequestingPhysician': str(getattr(ds, 'RequestingPhysician', 'UNKNOWN')),
+                    'Manufacturer': str(getattr(ds, 'Manufacturer', 'UNKNOWN')),
+                    'ManufacturerModelName': str(getattr(ds, 'ManufacturerModelName', 'UNKNOWN')),
+                    'StationName': str(getattr(ds, 'StationName', 'UNKNOWN'))
                 }
                 demographics.append(demo_data)
                 
