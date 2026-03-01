@@ -11,9 +11,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dicom_converter import DicomConverter
 from dataset_cleaner import FabellaCleaner
 from obb_labeler import OBBLabeler
+from seg_labeler import SegLabeler
 from yolo_preparer import YoloPreparer
 from yolo_trainer import YoloTrainer
 from yolo_tester import YoloTester
+from dataset_generator import DatasetGeneratorModal
 
 # Colors
 BG_COLOR = "#1E1E1E"
@@ -94,14 +96,15 @@ class FabellaApp:
 
     def log(self, message):
         # Appends a message to the log text area.
+        self.root.after(0, self.update_log_gui, message)
+
+    def update_log_gui(self, message):
         self.log_text.insert(tk.END, message + "\n")
         self.log_text.see(tk.END)
-        self.root.update_idletasks()
-
+        
     def set_status(self, message):
-        # Updates the status bar text.
-        self.status_bar.config(text=message)
-        self.root.update_idletasks()
+        # Safely updates the status bar text from any thread.
+        self.root.after(0, lambda: self.status_bar.config(text=message))
 
     def heading(self, parent, text):
         # Creates a heading label.
@@ -156,17 +159,31 @@ class FabellaApp:
         self.create_action_button(
             container, 
             "Clean Dataset", 
-            "Sort images into 'Sorted' (Keep) and 'Discarded' folders.", 
+            "Sort positive PNG images into 'Sorted/pos' (Keep) and 'Discarded/pos' folders.", 
             self.run_cleaner
+        )
+
+        self.create_action_button(
+            container, 
+            "Sort Negatives", 
+            "Review and sort negative PNG images into 'Sorted/neg' and 'Discarded/neg' folders.", 
+            self.run_neg_sorter
         )
 
         self.heading(container, "2. Labeling").pack(anchor=tk.W, pady=(20, 10))
 
         self.create_action_button(
             container, 
-            "Label Images", 
-            "Open the OBB Labeler tool to annotate sorted images.", 
+            "Label OBB", 
+            "Open the OBB Labeler tool to annotate sorted images with oriented boxes.", 
             self.run_labeler
+        )
+
+        self.create_action_button(
+            container, 
+            "Label Segmentation", 
+            "Open the Segmentation Labeler tool to draw polygon masks.", 
+            self.run_seg_labeler
         )
         
         self.heading(container, "3. Finalize").pack(anchor=tk.W, pady=(20, 10))
@@ -183,12 +200,27 @@ class FabellaApp:
         container = tk.Frame(self.tab_model, bg=BG_COLOR, padx=20, pady=20)
         container.pack(fill=tk.BOTH, expand=True)
 
-        self.heading(container, "4. Training").pack(anchor=tk.W, pady=(0, 10))
+        self.heading(container, "4. Model Settings").pack(anchor=tk.W, pady=(0, 10))
+        
+        settings_frame = tk.Frame(container, bg=BG_COLOR)
+        settings_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        tk.Label(settings_frame, text="Task Type:", bg=BG_COLOR, fg=FG_COLOR).grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
+        self.task_var = tk.StringVar(value="Segmentation")
+        task_cb = ttk.Combobox(settings_frame, textvariable=self.task_var, values=["Segmentation", "OBB"], state="readonly", width=15)
+        task_cb.grid(row=0, column=1, padx=5, pady=5)
+        
+        tk.Label(settings_frame, text="YOLO Version:", bg=BG_COLOR, fg=FG_COLOR).grid(row=0, column=2, padx=(20, 5), pady=5, sticky=tk.W)
+        self.version_var = tk.StringVar(value="11")
+        version_cb = ttk.Combobox(settings_frame, textvariable=self.version_var, values=["8", "9", "10", "11", "12", "26"], width=5)
+        version_cb.grid(row=0, column=3, padx=5, pady=5)
+
+        self.heading(container, "5. Training").pack(anchor=tk.W, pady=(0, 10))
         
         self.create_action_button(
             container, 
             "Train Model", 
-            "Start training YOLO11n-OBB on the prepared dataset (GPU recommended).", 
+            "Start training the selected YOLO model on the prepared dataset (GPU recommended).", 
             self.run_train_yolo,
             color="#2E7D32"  # Greenish
         )
@@ -225,9 +257,24 @@ class FabellaApp:
         self.run_in_thread(lambda: converter.run_conversion(progress_callback=self.log), "Converting DICOM files...")
 
     def run_cleaner(self):
-        # Opens the Dataset Cleaner window.
+        # Opens the Dataset Cleaner window for positive images.
         self.set_status("Opening Dataset Cleaner...")
         cleaner_window = FabellaCleaner(self.root)
+        self.set_status("Ready")
+
+    def run_neg_sorter(self):
+        # Opens the Dataset Cleaner window scoped to negative images.
+        # "Keep" = truly negative (no fabella) → data/sorted/neg
+        # "Discard" = actually has a fabella → data/sorted/pos
+        self.set_status("Opening Negative Sorter...")
+        FabellaCleaner(
+            self.root,
+            category="neg",
+            discard_dir_override="data/sorted/pos",
+            keep_label="NO FABELLA →",
+            discard_label="← HAS FABELLA",
+            window_title="Negative Sorter — Has Fabella? Move to Pos"
+        )
         self.set_status("Ready")
 
     def run_labeler(self):
@@ -242,21 +289,48 @@ class FabellaApp:
             self.log(f"Error: {e}")
             self.set_status("Error occurred")
             messagebox.showerror("Error", str(e))
+
+    def run_seg_labeler(self):
+        # Runs the Segmentation Labeler tool.
+        self.set_status("Opening Segmentation Labeler...")
+        labeler = SegLabeler()
+        try:
+            labeler.run()
+            self.set_status("Ready")
+        except Exception as e:
+            self.log(f"Error: {e}")
+            self.set_status("Error occurred")
+            messagebox.showerror("Error", str(e))
         
+    def get_current_task(self):
+        return "obb" if self.task_var.get() == "OBB" else "segment"
+
     def run_prepare_yolo(self):
-        # Runs the YOLO dataset preparation process.
-        preparer = YoloPreparer()
-        self.run_in_thread(lambda: preparer.setup_dataset(progress_callback=self.log), "Preparing YOLO dataset...")
+        # Opens the Dataset Generation & Augmentation modal, then runs YOLO preparation
+        # with the returned config when the user clicks Generate.
+        task = self.get_current_task()
+
+        def on_generate(config):
+            preparer = YoloPreparer(task=task)
+            self.run_in_thread(
+                lambda: preparer.setup_dataset(config=config, progress_callback=self.log),
+                f"Preparing {task.upper()} dataset..."
+            )
+
+        DatasetGeneratorModal(self.root, task=task, on_generate=on_generate)
 
     def run_train_yolo(self):
         # Runs the YOLO model training process.
-        trainer = YoloTrainer()
-        self.run_in_thread(lambda: trainer.train_fabella(progress_callback=self.log), "Training YOLO model...")
+        task = self.get_current_task()
+        version = self.version_var.get()
+        trainer = YoloTrainer(task=task, model_version=version)
+        self.run_in_thread(lambda: trainer.train_fabella(progress_callback=self.log), f"Training YOLOv{version} {task.upper()} model...")
 
     def run_test_model(self):
         # Runs the YOLO model testing process.
-        tester = YoloTester()
-        self.run_in_thread(lambda: tester.run_test(progress_callback=self.log), "Testing YOLO model...")
+        task = self.get_current_task()
+        tester = YoloTester(task=task)
+        self.run_in_thread(lambda: tester.run_test(progress_callback=self.log), f"Testing {task.upper()} model...")
 
 if __name__ == "__main__":
     root = tk.Tk()

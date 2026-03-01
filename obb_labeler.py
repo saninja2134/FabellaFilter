@@ -5,7 +5,7 @@ import numpy as np
 
 class OBBLabeler:
     # An OpenCV-based tool for annotating images with OBBs.
-    def __init__(self, image_dir="dataset_sorted/pos", label_dir="labels/pos"):
+    def __init__(self, image_dir="data/sorted/pos", label_dir="data/labels/obb"):
         # Initializes the OBBLabeler.
         # 
         # Args:
@@ -190,7 +190,15 @@ class OBBLabeler:
                 dmin, dmax = disp.min(), disp.max()
                 if dmax > dmin:
                     disp = ((disp - dmin) / (dmax - dmin) * 255).astype(np.uint8)
-                self.display_src = cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR) if len(disp.shape) == 2 else disp
+                
+                if len(disp.shape) == 2:
+                    self.display_src = cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR)
+                elif len(disp.shape) == 3 and disp.shape[2] == 1:
+                    self.display_src = cv2.cvtColor(disp, cv2.COLOR_GRAY2BGR)
+                elif len(disp.shape) == 3 and disp.shape[2] == 4:
+                    self.display_src = cv2.cvtColor(disp, cv2.COLOR_BGRA2BGR)
+                else:
+                    self.display_src = disp
             
             self.points = []
             

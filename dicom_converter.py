@@ -9,7 +9,7 @@ import csv
 
 class DicomConverter:
     # A class to handle the conversion of DICOM images to 16-bit PNG format.
-    def __init__(self, base_dir=".", output_base="dataset_png"):
+    def __init__(self, base_dir="data/raw", output_base="data/png"):
         # Initializes the DicomConverter.
         # 
         # Args:

@@ -5,18 +5,26 @@ import os
 
 class YoloTrainer:
     # A class to handle the training of the YOLO model.
-    def __init__(self, data_yaml="data.yaml", model_name="yolo12n-obb.pt", fallback_model="yolo11n-obb.pt", epochs=100, imgsz=1024, batch=4):
+    def __init__(self, task="segment", model_version="11", epochs=100, imgsz=1024, batch=4):
         # Initializes the YoloTrainer.
         # Args:
-        # data_yaml (str): Path to the data configuration file.
-        # model_name (str): Name of the primary YOLO model to use.
-        # fallback_model (str): Name of the fallback YOLO model.
+        # task (str): The YOLO task (e.g., 'segment', 'obb').
+        # model_version (str): The YOLO version (e.g., '8', '11').
         # epochs (int): Number of training epochs.
         # imgsz (int): Image size for training.
         # batch (int): Batch size for training.
-        self.data_yaml = data_yaml
-        self.model_name = model_name
-        self.fallback_model = fallback_model
+        self.task = task
+        self.data_yaml = f"data/yolo/data_{'obb' if task == 'obb' else 'seg'}.yaml"
+        
+        task_suffix = "-obb" if task == "obb" else "-seg"
+        
+        # Handle YOLOv8 naming convention (yolov8) vs others (yolo11, yolo26)
+        prefix = "yolov" if model_version == "8" else "yolo"
+        
+        self.model_name = f"{prefix}{model_version}n{task_suffix}.pt"
+            
+        self.fallback_model = f"yolov8n{task_suffix}.pt"
+        
         self.epochs = epochs
         self.imgsz = imgsz
         self.batch = batch
@@ -47,12 +55,13 @@ class YoloTrainer:
         try:
             model = YOLO(self.model_name)
         except Exception as e:
+            log(f"Error loading {self.model_name}: {e}")
             log(f"Warning: Could not load {self.model_name}. Standard weights might not be available yet.")
             log(f"Falling back to SOTA {self.fallback_model} as fallback.")
             model = YOLO(self.fallback_model)
 
         # 3. Train
-        log("Starting training...")
+        log(f"Starting {self.task} training...")
         results = model.train(
             data=self.data_yaml,
             epochs=self.epochs,
@@ -60,7 +69,8 @@ class YoloTrainer:
             batch=self.batch,
             device=device,
             workers=4,
-            name="fabella_obb_v12",
+            project="output/runs",
+            name=f"fabella_{self.task}_v1",
             patience=20,
             save=True,
             fliplr=0.5,
@@ -73,4 +83,4 @@ class YoloTrainer:
         )
 
         log("\nTraining Finished!")
-        log(f"Best model saved in: runs/obb/fabella_obb_v12/weights/best.pt")
+        log(f"Best model saved in: output/runs/fabella_{self.task}_v1/weights/best.pt")

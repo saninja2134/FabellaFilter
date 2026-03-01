@@ -17,7 +17,9 @@ BUTTON_ACTIVE = "#444444"
 
 class FabellaCleaner(tk.Toplevel):
     # A Tkinter Toplevel window for sorting images into keep/discard categories.
-    def __init__(self, parent, input_base="dataset_png", output_base="dataset_sorted", discard_base="dataset_discarded", category="pos"):
+    def __init__(self, parent, input_base="data/png", output_base="data/sorted", discard_base="data/discarded",
+                 category="pos", discard_dir_override=None, keep_label="KEEP →", discard_label="← DISCARD",
+                 window_title="Fabella Dataset Cleaner"):
         # Initializes the FabellaCleaner window.
         # 
         # Args:
@@ -26,8 +28,12 @@ class FabellaCleaner(tk.Toplevel):
         # output_base (str): The base directory to save kept images.
         # discard_base (str): The base directory to save discarded images.
         # category (str): The category to process (e.g., 'pos' or 'neg').
+        # discard_dir_override (str): If set, discarded images go here instead of discard_base/category.
+        # keep_label (str): Text for the keep button.
+        # discard_label (str): Text for the discard button.
+        # window_title (str): Title of the window.
         super().__init__(parent)
-        self.title("Fabella Dataset Cleaner")
+        self.title(window_title)
         self.geometry("1000x900")
         self.configure(bg=BG_COLOR)
 
@@ -35,11 +41,16 @@ class FabellaCleaner(tk.Toplevel):
         self.input_base = input_base
         self.output_base = output_base
         self.discard_base = discard_base
+        self._keep_label = keep_label
+        self._discard_label = discard_label
         
         self.category = category 
         self.input_dir = os.path.join(self.input_base, self.category)
         self.output_dir = os.path.join(self.output_base, self.category)
-        self.discard_dir = os.path.join(self.discard_base, self.category)
+        if discard_dir_override:
+            self.discard_dir = discard_dir_override
+        else:
+            self.discard_dir = os.path.join(self.discard_base, self.category)
 
         for d in [self.output_dir, self.discard_dir]:
             if not os.path.exists(d):
@@ -142,7 +153,7 @@ class FabellaCleaner(tk.Toplevel):
         # Create custom styled buttons
         self.btn_discard = self.create_button(
             self.controls_frame, 
-            "← DISCARD", 
+            self._discard_label, 
             ACCENT_DISCARD, 
             self.discard_current
         )
@@ -158,7 +169,7 @@ class FabellaCleaner(tk.Toplevel):
 
         self.btn_keep = self.create_button(
             self.controls_frame, 
-            "KEEP →", 
+            self._keep_label, 
             ACCENT_KEEP, 
             self.keep_current
         )
@@ -295,7 +306,10 @@ class FabellaCleaner(tk.Toplevel):
         if self.original_image_cv is None:
             return
             
-        h, w = self.original_image_cv.shape
+        if len(self.original_image_cv.shape) == 3:
+            h, w, _ = self.original_image_cv.shape
+        else:
+            h, w = self.original_image_cv.shape
         
         # Calculate fit scale first so image fits in window by default
         canvas_width = self.winfo_width()
@@ -317,7 +331,11 @@ class FabellaCleaner(tk.Toplevel):
         # Resize image
         img_resized = cv2.resize(self.original_image_cv, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
         
-        img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_GRAY2RGB)
+        if len(img_resized.shape) == 2:
+            img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_GRAY2RGB)
+        else:
+            img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
+            
         img_pil = Image.fromarray(img_rgb)
         self.tk_img = ImageTk.PhotoImage(img_pil)
         

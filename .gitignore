@@ -1,3 +1,7 @@
 __pycache__/
-neg/
-pos/
+data/
+output/
+temp_neg_png/
+*.pt
+*.yaml
+*.pth
