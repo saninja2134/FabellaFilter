@@ -13,8 +13,9 @@ from dicom_converter import DicomConverter
 from dataset_cleaner import FabellaCleaner
 from obb_labeler import OBBLabeler
 from seg_labeler import SegLabeler
+from sam3_auto_labeler import SAM3AutoLabeler
 from yolo_preparer import YoloPreparer
-from model_trainer import ModelTrainer, ARCHITECTURES
+from model_trainer import ModelTrainer, ModelRegistry, ARCHITECTURES
 from model_tester import ModelTester
 from dataset_generator import DatasetGeneratorModal
 
@@ -208,6 +209,23 @@ class FabellaApp:
         container = tk.Frame(self.tab_dataset, bg=BG_COLOR, padx=20, pady=20)
         container.pack(fill=tk.BOTH, expand=True)
 
+        # ── Dataset Stats Panel ──────────────────────────────────
+        stats_frame = tk.Frame(container, bg="#252526", highlightbackground="#3E3E3E",
+                               highlightthickness=1, padx=12, pady=8)
+        stats_frame.pack(fill=tk.X, pady=(0, 12))
+
+        tk.Label(stats_frame, text="Dataset Overview", font=("Segoe UI", 10, "bold"),
+                 bg="#252526", fg=ACCENT_COLOR).pack(anchor=tk.W)
+
+        self.stats_label_var = tk.StringVar(
+            value="Scanning..."
+        )
+        tk.Label(stats_frame, textvariable=self.stats_label_var,
+                 font=("Consolas", 8), bg="#252526", fg="#BBBBBB",
+                 justify=tk.LEFT, anchor=tk.W).pack(fill=tk.X, anchor=tk.W, pady=(4, 0))
+
+        self.root.after(300, self._refresh_dataset_stats)
+
         self.heading(container, "1. Pre-Processing").pack(anchor=tk.W, pady=(0, 10))
         
         self.create_action_button(
@@ -246,13 +264,21 @@ class FabellaApp:
             "Open the Segmentation Labeler tool to draw polygon masks.", 
             self.run_seg_labeler
         )
+
+        self.create_action_button(
+            container,
+            "SAM3 Auto-Label",
+            "AI-assisted labeling: SAM3 proposes masks from existing labels, you approve/reject. Learns as you go.",
+            self.run_sam3_auto_labeler,
+            color="#6A1B9A"
+        )
         
         self.heading(container, "3. Finalize").pack(anchor=tk.W, pady=(20, 10))
 
         self.create_action_button(
             container,
             "Prepare Dataset",
-            "Open augmentation modal, then build Train/Val split and generate config for the selected architecture.",
+            "Configure augmentation, then build Train/Val split + YOLO + COCO + Detection formats (all architectures).",
             self.run_prepare_dataset
         )
 
@@ -326,6 +352,35 @@ class FabellaApp:
         )
 
         self.heading(container, "6. Evaluation").pack(anchor=tk.W, pady=(20, 10))
+
+        # ── Model picker ─────────────────────────────────────────
+        picker_frame = tk.Frame(container, bg=BG_COLOR)
+        picker_frame.pack(fill=tk.X, pady=(0, 4))
+
+        tk.Label(picker_frame, text="Model:", bg=BG_COLOR, fg=FG_COLOR,
+                 font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(0, 6))
+
+        self.model_select_var = tk.StringVar(value="")
+        self.model_select_cb  = ttk.Combobox(
+            picker_frame, textvariable=self.model_select_var,
+            state="readonly", width=44
+        )
+        self.model_select_cb.pack(side=tk.LEFT, padx=(0, 6))
+        self.model_select_cb.bind("<<ComboboxSelected>>", self._on_model_select)
+
+        tk.Button(
+            picker_frame, text="↻ Refresh",
+            bg=BUTTON_BG, fg=FG_COLOR, activebackground=BUTTON_ACTIVE,
+            relief=tk.FLAT, padx=8, command=self._refresh_model_list
+        ).pack(side=tk.LEFT)
+
+        self.model_info_var = tk.StringVar(value="No models found — train one first.")
+        tk.Label(container, textvariable=self.model_info_var,
+                 bg=BG_COLOR, fg="#9E9E9E",
+                 font=("Segoe UI", 8), anchor=tk.W).pack(fill=tk.X, pady=(0, 8))
+
+        self._available_models = []
+        self._refresh_model_list()
 
         self.create_action_button(
             container,
@@ -401,6 +456,57 @@ class FabellaApp:
             self.log(f"Error: {e}")
             self.set_status("Error occurred")
             messagebox.showerror("Error", str(e))
+
+    def run_sam3_auto_labeler(self):
+        # Runs the SAM3 AI-assisted auto-labeler.
+        self.set_status("Opening SAM3 Auto-Labeler...")
+        labeler = SAM3AutoLabeler()
+        try:
+            labeler.run()
+            self.log(f"SAM3 session: {labeler.stats['approved']} approved, "
+                     f"{labeler.stats['rejected']} rejected, "
+                     f"{labeler.stats['edited']} manually edited")
+            self.set_status("Ready")
+            self._refresh_dataset_stats()
+        except Exception as e:
+            self.log(f"Error: {e}")
+            self.set_status("Error occurred")
+            messagebox.showerror("Error", str(e))
+
+    def _refresh_dataset_stats(self):
+        """Scan directories and update the stats panel in the Dataset Tools tab."""
+        def _count(d, ext=".png"):
+            if not os.path.isdir(d):
+                return 0
+            return len([f for f in os.listdir(d) if f.lower().endswith(ext)])
+
+        raw_pos   = _count("data/raw/pos", ".dcm")
+        raw_neg   = _count("data/raw/neg", ".dcm")
+        png_pos   = _count("data/png/pos")
+        png_neg   = _count("data/png/neg")
+        sort_pos  = _count("data/sorted/pos")
+        sort_neg  = _count("data/sorted/neg")
+        lbl_seg   = _count("data/labels/seg", ".txt")
+        lbl_obb   = _count("data/labels/obb", ".txt")
+
+        yolo_seg  = os.path.isfile("data/yolo/data_seg.yaml")
+        yolo_det  = os.path.isfile("data/yolo/data_det.yaml")
+        coco_ok   = os.path.isdir("data/coco/train")
+
+        parts = []
+        parts.append(f"Raw DICOM:  {raw_pos} pos  |  {raw_neg} neg")
+        parts.append(f"PNG:        {png_pos} pos  |  {png_neg} neg")
+        parts.append(f"Sorted:     {sort_pos} pos  |  {sort_neg} neg")
+        parts.append(f"Labels:     {lbl_seg} seg  |  {lbl_obb} obb")
+
+        fmt_parts = []
+        if yolo_seg: fmt_parts.append("YOLO Seg")
+        if yolo_det: fmt_parts.append("YOLO Det")
+        if coco_ok:  fmt_parts.append("COCO")
+        fmt_str = ", ".join(fmt_parts) if fmt_parts else "Not prepared"
+        parts.append(f"Prepared:   {fmt_str}")
+
+        self.stats_label_var.set("\n".join(parts))
         
     def _on_arch_change(self, _event=None):
         # Update version and size dropdowns when architecture changes.
@@ -454,10 +560,9 @@ class FabellaApp:
         # Opens the augmentation modal, then shows a progress window while preparing.
         arch = self.arch_var.get()
         task = self._get_yolo_task()
-        also_coco = (ARCHITECTURES.get(arch, {}).get("format") == "coco")
 
         def on_generate(config):
-            prog = PrepareProgressWindow(self.root, title=f"Preparing Dataset — {arch}")
+            prog = PrepareProgressWindow(self.root, title=f"Preparing Dataset — All Formats")
 
             def step_cb(pct, label):
                 self.root.after(0, prog.update_step, pct, label)
@@ -467,16 +572,17 @@ class FabellaApp:
                 self.root.after(0, prog.append_log, msg)
 
             def run():
-                self.set_status(f"Preparing dataset ({arch})...")
+                self.set_status(f"Preparing dataset (YOLO + COCO + Detection)...")
                 try:
                     preparer = YoloPreparer(task=task)
                     preparer.setup_dataset(
                         config=config,
-                        also_export_coco=also_coco,
                         progress_callback=log_cb,
                         step_callback=step_cb,
                     )
                     self.set_status("Ready")
+                    # Refresh stats panel
+                    self.root.after(200, self._refresh_dataset_stats)
                 except Exception as e:
                     self.root.after(0, self.log, f"Error: {e}")
                     self.set_status("Error occurred")
@@ -498,6 +604,8 @@ class FabellaApp:
             path = getattr(trainer, 'results_plot_path', None)
             if path and os.path.exists(path):
                 self.root.after(0, lambda: self._show_results_plot(path))
+            # Refresh model selector now that a new run is registered
+            self.root.after(200, self._refresh_model_list)
 
         self.run_in_thread(do_train, f"Training {arch} {size}...")
 
@@ -523,13 +631,59 @@ class FabellaApp:
         except Exception as e:
             self.log(f"Could not show results plot: {e}")
 
+    def _refresh_model_list(self):
+        """Scan registry + disk and populate the model selector combobox."""
+        models = ModelRegistry.all_models()
+        self._available_models = models
+        if not models:
+            self.model_select_cb.config(values=[])
+            self.model_select_var.set("")
+            self.model_info_var.set("No models found — train one first.")
+            return
+
+        labels = []
+        for m in models:
+            version = f" v{m['version']}" if m.get("version") else ""
+            labels.append(f"{m['arch']}{version} [{m['size']}] — {m['date']}")
+
+        self.model_select_cb.config(values=labels)
+        self.model_select_var.set(labels[0])
+        self._on_model_select()
+
+    def _on_model_select(self, _event=None):
+        """Update the info label when a model is chosen from the dropdown."""
+        idx = self.model_select_cb.current()
+        if idx < 0 or idx >= len(self._available_models):
+            return
+        m = self._available_models[idx]
+        weights = m.get("weights_path", "?")
+        exists  = "✓ weights found" if os.path.exists(weights) else "✗ weights missing"
+        info = (
+            f"Run: {m['run_name']}  |  "
+            f"Epochs: {m.get('epochs','?')}  |  "
+            f"ImgSize: {m.get('imgsz','?')}  |  "
+            f"Batch: {m.get('batch','?')}  |  "
+            f"{exists}"
+        )
+        self.model_info_var.set(info)
+
     def run_test_model(self):
-        # Runs inference with the selected trained model.
-        arch, _version, size, *_ = self._get_arch_info()
+        idx = self.model_select_cb.current()
+        if not self._available_models:
+            messagebox.showwarning("No Model", "No trained models found. Train a model first.")
+            return
+        if idx < 0:
+            idx = 0
+        entry = self._available_models[idx]
+        arch  = entry.get("arch", "YOLO Seg")
+        size  = entry.get("size", "n")
+        weights = entry.get("weights_path", "")
         tester = ModelTester(arch=arch, size=size)
+        if weights and os.path.exists(weights):
+            tester.model_path = weights
         self.run_in_thread(
             lambda: tester.run_test(progress_callback=self.log),
-            f"Testing {arch} {size}..."
+            f"Testing {arch} [{size}]..."
         )
 
 if __name__ == "__main__":

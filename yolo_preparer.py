@@ -111,13 +111,14 @@ class YoloPreparer:
             print(f"Error converting {src_path}: {e}")
             return False
 
-    def setup_dataset(self, config=None, also_export_coco=False, progress_callback=None, step_callback=None):
+    def setup_dataset(self, config=None, also_export_coco=True, progress_callback=None, step_callback=None):
         # Prepares the dataset by gathering positive samples, sampling negative samples,
         # splitting into train/val sets, and creating the data.yaml file.
+        # COCO format is ALWAYS exported alongside YOLO (uses hard links, no space waste).
         #
         # Args:
         # config (dict, optional): Augmentation/preprocessing config from DatasetGeneratorModal.
-        # also_export_coco (bool): Also write COCO JSON format for RF-DETR.
+        # also_export_coco (bool): Also write COCO JSON format (default True, always recommended).
         # progress_callback (callable): Called with a log string.
         # step_callback (callable): Called with (pct: int, label: str) for progress bar updates.
         def log(msg):
@@ -340,10 +341,15 @@ names:
         log(f"YAML config saved to: {self.yaml_path.replace(os.sep, '/')}")
         step(100, "Complete!")
 
-        # 7. Optionally export COCO format (required for RF-DETR)
-        if also_export_coco:
-            log("\nExporting COCO format dataset...")
-            self.export_coco(log)
+        # 7. Always export COCO format (needed by RF-DETR; uses hard links so no space waste)
+        log("\nExporting COCO format dataset...")
+        step(96, "Exporting COCO format...")
+        self.export_coco(log)
+
+        # 8. Also write detection-format labels (bbox derived from polygons) for RT-DETR
+        if self.task == 'segment':
+            self._export_detect_variant(log)
+            step(98, "Detection labels exported.")
 
     def export_coco(self, log=print):
         # Converts the prepared YOLO split into COCO JSON format under data/coco/.
@@ -379,7 +385,10 @@ names:
                 src_path = os.path.join(img_src, fname)
                 dst_path = os.path.join(img_dst, fname)
                 if not os.path.exists(dst_path):
-                    shutil.copy(src_path, dst_path)
+                    try:
+                        os.link(src_path, dst_path)   # hard link — zero extra disk space
+                    except OSError:
+                        shutil.copy(src_path, dst_path)  # fallback for cross-drive
 
                 img = cv2.imread(src_path, cv2.IMREAD_UNCHANGED)
                 if img is None:
@@ -437,3 +446,59 @@ names:
                 shutil.rmtree(test_dir)
             shutil.copytree(valid_dir, test_dir)
             log(f"  COCO test: mirrored from valid/ -> data/coco/test/")
+
+    def _export_detect_variant(self, log=print):
+        """Create detection (bbox) labels + YAML from existing seg labels.
+
+        This allows RT-DETR and other detection models to train
+        without re-running the full prepare step.  Images are hard-linked
+        (zero extra disk space); only the label files are new.
+        """
+        seg_base = self.base_output  # e.g. data/yolo/seg
+        det_base = seg_base.replace('/seg', '/det').replace('\\seg', '\\det')
+        if det_base == seg_base:
+            det_base = os.path.join('data', 'yolo', 'det')
+
+        for split in ['train', 'val']:
+            seg_img_dir = os.path.join(seg_base, split, 'images')
+            seg_lbl_dir = os.path.join(seg_base, split, 'labels')
+            det_img_dir = os.path.join(det_base, split, 'images')
+            det_lbl_dir = os.path.join(det_base, split, 'labels')
+            os.makedirs(det_img_dir, exist_ok=True)
+            os.makedirs(det_lbl_dir, exist_ok=True)
+
+            if not os.path.isdir(seg_img_dir):
+                continue
+
+            # Hard-link images (zero extra space)
+            for fname in os.listdir(seg_img_dir):
+                src = os.path.join(seg_img_dir, fname)
+                dst = os.path.join(det_img_dir, fname)
+                if not os.path.exists(dst):
+                    try:
+                        os.link(src, dst)
+                    except OSError:
+                        shutil.copy(src, dst)
+
+            # Convert polygon labels → bbox labels
+            if not os.path.isdir(seg_lbl_dir):
+                continue
+            for fname in os.listdir(seg_lbl_dir):
+                if not fname.endswith('.txt'):
+                    continue
+                seg_labels = augmentor.read_labels(os.path.join(seg_lbl_dir, fname))
+                det_labels = [(cid, self._poly_to_bbox(coords)) for cid, coords in seg_labels]
+                augmentor.write_labels(os.path.join(det_lbl_dir, fname), det_labels)
+
+        # Write detection YAML
+        det_yaml = os.path.join('data', 'yolo', 'data_det.yaml')
+        yaml_content = f"""path: {os.path.abspath(det_base).replace(os.sep, '/')}
+train: train/images
+val: val/images
+
+names:
+  0: fabella
+"""
+        with open(det_yaml, 'w') as f:
+            f.write(yaml_content)
+        log(f"  Detection variant: {det_base} + {det_yaml}")

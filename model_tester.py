@@ -60,13 +60,12 @@ class ModelTester:
             log("No unsorted images found for testing.")
             return
 
-        test_batch = unsorted[len(unsorted) // 2:]
-        log(f"Running {self.arch} inference on {len(test_batch)} images...")
+        log(f"Running {self.arch} inference on {len(unsorted)} unsorted images...")
 
         if self.backend == "ultralytics":
-            self._test_ultralytics(test_batch, det_dir, undet_dir, log)
+            self._test_ultralytics(unsorted, det_dir, undet_dir, log)
         elif self.backend == "rfdetr":
-            self._test_rfdetr(test_batch, det_dir, undet_dir, log)
+            self._test_rfdetr(unsorted, det_dir, undet_dir, log)
 
         log(f"\nTest complete!")
         log(f"Detected:   {len(os.listdir(det_dir))}")
@@ -98,8 +97,6 @@ class ModelTester:
         model = YOLO(self.model_path)
 
         for i, img_name in enumerate(batch):
-            if i >= 1000:
-                break
             img_path   = os.path.join(self.src_dir, img_name)
             img_visual = self._prep_visual(img_path)
             if img_visual is None:
@@ -156,8 +153,6 @@ class ModelTester:
 
         from PIL import Image as PILImage
         for i, img_name in enumerate(batch):
-            if i >= 1000:
-                break
             img_path   = os.path.join(self.src_dir, img_name)
             img_visual = self._prep_visual(img_path)
             if img_visual is None:

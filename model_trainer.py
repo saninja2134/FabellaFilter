@@ -2,7 +2,87 @@
 import os
 import re
 import sys
+import json
 import torch
+from datetime import datetime
+
+REGISTRY_PATH = os.path.join("output", "model_registry.json")
+
+
+# ─────────────────────────────────────────────────────────────────
+# MODEL REGISTRY
+# ─────────────────────────────────────────────────────────────────
+
+class ModelRegistry:
+    """Persistent JSON registry of every trained model run.
+    Also scans output/runs/ for unregistered models found on disk."""
+
+    @staticmethod
+    def load():
+        if os.path.exists(REGISTRY_PATH):
+            try:
+                with open(REGISTRY_PATH) as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return []
+
+    @staticmethod
+    def register(entry):
+        """Insert or replace entry by run_name (newest-first order)."""
+        records = ModelRegistry.load()
+        records = [r for r in records if r.get("run_name") != entry["run_name"]]
+        records.insert(0, entry)
+        os.makedirs(os.path.dirname(REGISTRY_PATH), exist_ok=True)
+        with open(REGISTRY_PATH, "w") as f:
+            json.dump(records, f, indent=2)
+
+    @staticmethod
+    def all_models():
+        """Return registry entries + any unregistered on-disk runs."""
+        records = ModelRegistry.load()
+        known = {r["run_name"] for r in records}
+        runs_dir = os.path.join("output", "runs")
+        if os.path.isdir(runs_dir):
+            for name in sorted(os.listdir(runs_dir)):
+                if name in known:
+                    continue
+                weights = os.path.join(runs_dir, name, "weights", "best.pt")
+                if os.path.exists(weights):
+                    arch, size = ModelRegistry._infer_from_name(name)
+                    records.append({
+                        "run_name":     name,
+                        "arch":         arch,
+                        "version":      "",
+                        "size":         size,
+                        "epochs":       "?",
+                        "imgsz":        "?",
+                        "batch":        "?",
+                        "date":         "unknown",
+                        "weights_path": weights,
+                        "results_plot": os.path.join(runs_dir, name, "results.png"),
+                    })
+        return records
+
+    @staticmethod
+    def _infer_from_name(name):
+        """Best-effort parse of run_name like fabella_yolo_seg_n_v1."""
+        stripped = name
+        if stripped.startswith("fabella_"):
+            stripped = stripped[len("fabella_"):]
+        if "_v" in stripped:
+            stripped = stripped[:stripped.rfind("_v")]
+        parts = stripped.rsplit("_", 1)
+        size     = parts[-1] if len(parts) > 1 else "?"
+        arch_key = parts[0]  if len(parts) > 1 else stripped
+        arch_map = {
+            "yolo_seg": "YOLO Seg",
+            "yolo_obb": "YOLO OBB",
+            "rt_detr":  "RT-DETR",
+            "rf_detr":  "RF-DETR",
+        }
+        return arch_map.get(arch_key, arch_key), size
+
 
 # ─────────────────────────────────────────────────────────────────
 # Registry: defines every supported architecture
@@ -82,8 +162,20 @@ class ModelTrainer:
         # Derive paths
         task_key = "obb" if self.task == "obb" else ("seg" if self.task == "segment" else "det")
         safe_arch = arch.lower().replace(" ", "_").replace("-", "_")
-        self.run_name   = f"fabella_{safe_arch}_{size}_v1"
+        base_name = f"fabella_{safe_arch}_{size}"
+
+        # Auto-version: scan existing runs and pick next version number
         self.output_dir = "output/runs"
+        next_v = 1
+        if os.path.isdir(self.output_dir):
+            for name in os.listdir(self.output_dir):
+                if name.startswith(base_name + "_v"):
+                    try:
+                        v = int(name.split("_v")[-1])
+                        next_v = max(next_v, v + 1)
+                    except ValueError:
+                        pass
+        self.run_name   = f"{base_name}_v{next_v}"
         self.data_yaml  = f"data/yolo/data_{task_key}.yaml"
         self.coco_dir   = f"data/coco"
         self.results_plot_path = None   # set after training if a chart was generated
@@ -163,6 +255,7 @@ class ModelTrainer:
         plot = os.path.join(self.output_dir, self.run_name, "results.png")
         if os.path.exists(plot):
             self.results_plot_path = plot
+        ModelRegistry.register(self._make_registry_entry())
         log(f"\nTraining complete! Best model: {best}")
 
     def _train_rfdetr(self, log):
@@ -191,8 +284,22 @@ class ModelTrainer:
             return
 
         if not os.path.exists(self.coco_dir):
-            log(f"Error: {self.coco_dir} not found. Run 'Prepare Dataset' first (RF-DETR needs COCO format).")
-            return
+            # Auto-generate COCO from existing YOLO data if available
+            yolo_seg = os.path.join("data", "yolo", "seg")
+            if os.path.isdir(yolo_seg):
+                log("COCO format not found — auto-generating from YOLO data...")
+                try:
+                    from yolo_preparer import YoloPreparer
+                    prep = YoloPreparer(task="segment")
+                    prep.export_coco(log)
+                    log("COCO export complete.")
+                except Exception as e:
+                    log(f"Error generating COCO: {e}")
+                    return
+            else:
+                log(f"Error: {self.coco_dir} not found and no YOLO data to convert.")
+                log("Run 'Prepare Dataset' first.")
+                return
 
         # RF-DETR expects _annotations.coco.json inside each split folder.
         # Roboflow layout: train/ and valid/ (not val/).
@@ -267,6 +374,7 @@ class ModelTrainer:
                 run_test=False,
             )
             log(f"\nRF-DETR training complete! Output: {self.output_dir}/{self.run_name}")
+            ModelRegistry.register(self._make_registry_entry())
         except Exception as e:
             log(f"Training error: {e}")
         finally:
@@ -292,6 +400,20 @@ class ModelTrainer:
             if plot:
                 self.results_plot_path = plot
                 log(f"Results chart saved: {plot}")
+    def _make_registry_entry(self):
+        return {
+            "run_name":     self.run_name,
+            "arch":         self.arch,
+            "version":      self.version,
+            "size":         self.size,
+            "epochs":       self.epochs,
+            "imgsz":        self.imgsz,
+            "batch":        self.batch,
+            "date":         datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "weights_path": os.path.join(self.output_dir, self.run_name, "weights", "best.pt").replace(os.sep, "/"),
+            "results_plot": os.path.join(self.output_dir, self.run_name, "results.png").replace(os.sep, "/"),
+        }
+
     def _plot_rfdetr_results(self, metrics, out_dir):
         """Generate and save a training results chart from per-epoch metrics."""
         try:
