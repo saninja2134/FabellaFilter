@@ -3,6 +3,7 @@ import os
 import shutil
 import random
 import csv
+import json
 import pydicom
 import numpy as np
 import cv2
@@ -15,15 +16,34 @@ class YoloPreparer:
     def __init__(self, task="segment", pos_img_dir="data/sorted/pos", neg_dicom_dir="data/raw/neg"):
         # Initializes the YoloPreparer.
         # Args:
-        # task (str): The task type ('segment' or 'obb').
+        # task (str): The task type ('segment', 'obb', or 'detect').
         # pos_img_dir (str): Directory containing positive images.
         # neg_dicom_dir (str): Directory containing negative DICOM images.
         self.task = task
         self.pos_img_dir = pos_img_dir
-        self.label_dir = f"data/labels/{'obb' if task == 'obb' else 'seg'}"
+        # Detection uses segmentation polygon labels as source (bbox derived on write)
+        if task == 'obb':
+            task_key = 'obb'
+        elif task == 'detect':
+            task_key = 'det'
+        else:
+            task_key = 'seg'
+        self.label_dir = os.path.join('data', 'labels', 'obb' if task == 'obb' else 'seg')
         self.neg_dicom_dir = neg_dicom_dir
-        self.base_output = f"data/yolo/{'obb' if task == 'obb' else 'seg'}"
-        self.yaml_path = f"data/yolo/data_{'obb' if task == 'obb' else 'seg'}.yaml"
+        self.base_output = os.path.join('data', 'yolo', task_key)
+        self.yaml_path = os.path.join('data', 'yolo', f'data_{task_key}.yaml')
+
+    @staticmethod
+    def _poly_to_bbox(coords):
+        # Converts flat normalized polygon coords to YOLO detection bbox [cx, cy, w, h].
+        pts = augmentor.pair_points(coords)
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
+        cx = (x_min + x_max) / 2
+        cy = (y_min + y_max) / 2
+        return [cx, cy, x_max - x_min, y_max - y_min]
 
     def convert_dicom_to_16bit_png(self, src_path, dst_path, device=None):
         # Converts a single DICOM file to a 16-bit PNG.
@@ -91,21 +111,27 @@ class YoloPreparer:
             print(f"Error converting {src_path}: {e}")
             return False
 
-    def setup_dataset(self, config=None, progress_callback=None):
+    def setup_dataset(self, config=None, also_export_coco=False, progress_callback=None, step_callback=None):
         # Prepares the dataset by gathering positive samples, sampling negative samples,
         # splitting into train/val sets, and creating the data.yaml file.
         #
         # Args:
         # config (dict, optional): Augmentation/preprocessing config from DatasetGeneratorModal.
-        # progress_callback (callable, optional): A function to call with progress updates.
+        # also_export_coco (bool): Also write COCO JSON format for RF-DETR.
+        # progress_callback (callable): Called with a log string.
+        # step_callback (callable): Called with (pct: int, label: str) for progress bar updates.
         def log(msg):
             print(msg)
             if progress_callback: progress_callback(msg)
+
+        def step(pct, label=""):
+            if step_callback: step_callback(pct, label)
 
         multiplier = 1
         if config:
             multiplier = config.get('generation', {}).get('multiplier', 1)
 
+        step(0, "Scanning labeled positives...")
         # 1. Gather all POS samples that have labels
         if not os.path.exists(self.label_dir):
             log(f"Error: {self.label_dir} does not exist.")
@@ -137,33 +163,61 @@ class YoloPreparer:
         log(f"Found {len(pos_samples)} labeled positive images.")
         if config:
             log(f"Augmentation multiplier: x{multiplier}")
+        step(5, "Positives loaded.")
 
-        # 2. Pick a random set of NEG images
-        if not os.path.exists(self.neg_dicom_dir):
-            log(f"Error: {self.neg_dicom_dir} does not exist.")
-            return
-
-        neg_dicoms = [f for f in os.listdir(self.neg_dicom_dir) if f.lower().endswith('.dcm')]
-        random.shuffle(neg_dicoms)
-        num_neg = min(len(neg_dicoms), len(pos_samples))
-        selected_neg = neg_dicoms[:num_neg]
-
-        log(f"Processing {num_neg} negative background images...")
-
-        temp_neg_png = "temp_neg_png"
-        if not os.path.exists(temp_neg_png): os.makedirs(temp_neg_png)
-
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # 2. Gather NEG images
+        # Priority: use sorted/reviewed PNGs from data/sorted/neg first.
+        # Fall back to converting raw DICOMs only when no sorted negatives exist.
+        sorted_neg_dir = "data/sorted/neg"
+        sorted_neg_pngs = []
+        if os.path.exists(sorted_neg_dir):
+            sorted_neg_pngs = [f for f in os.listdir(sorted_neg_dir) if f.lower().endswith('.png')]
 
         neg_samples = []
-        for i, dcm in enumerate(selected_neg):
-            png_name = dcm.replace('.dcm', '.png')
-            dst_path = os.path.join(temp_neg_png, png_name)
-            if self.convert_dicom_to_16bit_png(os.path.join(self.neg_dicom_dir, dcm), dst_path, device=device):
-                neg_samples.append((dst_path, None))
+        temp_neg_png = None
 
-            if (i + 1) % 10 == 0 or (i + 1) == num_neg:
-                log(f"Converted {i + 1}/{num_neg} negative images...")
+        if sorted_neg_pngs:
+            # Use curated negatives that passed the Sort Negatives review step
+            random.shuffle(sorted_neg_pngs)
+            num_neg = min(len(sorted_neg_pngs), len(pos_samples))
+            selected = sorted_neg_pngs[:num_neg]
+            log(f"Using {num_neg} sorted (reviewed) negative images from {sorted_neg_dir}.")
+            step(15, f"Loading {num_neg} sorted negatives...")
+            for i, fname in enumerate(selected):
+                neg_samples.append((os.path.join(sorted_neg_dir, fname), None))
+                if (i + 1) % 20 == 0 or (i + 1) == num_neg:
+                    step(15 + int(55 * (i + 1) / num_neg), f"Loading negatives {i+1}/{num_neg}...")
+        else:
+            # No sorted negatives yet — fall back to converting raw DICOMs
+            log("No sorted negatives found. Falling back to raw DICOM conversion from data/raw/neg.")
+            log("Tip: Run 'Sort Negatives' first to use reviewed background images.")
+
+            if not os.path.exists(self.neg_dicom_dir):
+                log(f"Error: {self.neg_dicom_dir} does not exist either. Cannot find any negatives.")
+                return
+
+            neg_dicoms = [f for f in os.listdir(self.neg_dicom_dir) if f.lower().endswith('.dcm')]
+            random.shuffle(neg_dicoms)
+            num_neg = min(len(neg_dicoms), len(pos_samples))
+            selected_neg = neg_dicoms[:num_neg]
+
+            log(f"Converting {num_neg} negative DICOM images...")
+            step(15, f"Converting {num_neg} DICOM negatives...")
+
+            temp_neg_png = "temp_neg_png"
+            if not os.path.exists(temp_neg_png):
+                os.makedirs(temp_neg_png)
+
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+            for i, dcm in enumerate(selected_neg):
+                png_name = dcm.replace('.dcm', '.png')
+                dst_path = os.path.join(temp_neg_png, png_name)
+                if self.convert_dicom_to_16bit_png(os.path.join(self.neg_dicom_dir, dcm), dst_path, device=device):
+                    neg_samples.append((dst_path, None))
+                if (i + 1) % 10 == 0 or (i + 1) == num_neg:
+                    log(f"Converted {i + 1}/{num_neg} negative images...")
+                    step(15 + int(55 * (i + 1) / num_neg), f"Converting DICOM {i+1}/{num_neg}...")
 
         # 3. Split into Train/Val
         all_samples = pos_samples + neg_samples
@@ -203,7 +257,12 @@ class YoloPreparer:
                 stem = os.path.splitext(fname)[0]
                 lbl_fname = stem + '.txt'
                 lbl_dst = os.path.join(self.base_output, split, 'labels', lbl_fname)
-                augmentor.write_labels(lbl_dst, labels)
+                # For detection task, convert polygon coords → YOLO bbox format
+                if self.task == 'detect':
+                    det_labels = [(cid, self._poly_to_bbox(coords)) for cid, coords in labels]
+                    augmentor.write_labels(lbl_dst, det_labels)
+                else:
+                    augmentor.write_labels(lbl_dst, labels)
                 rel_lbl = os.path.join(split, 'labels', lbl_fname)
                 for cid, coords in labels:
                     coords_str = ' '.join(f'{c:.6f}' for c in coords)
@@ -240,17 +299,20 @@ class YoloPreparer:
                                            is_augmented=True)
 
         log("Building training set...")
+        step(72, "Building training set...")
         process_samples(train_samples, 'train')
         log("Building validation set...")
+        step(85, "Building validation set...")
         process_samples(val_samples, 'val')
 
-        # CLEANUP: Remove temporary negative DICOM conversions to prevent memory leaks
-        if os.path.exists(temp_neg_png):
+        # CLEANUP: Remove temporary negative PNG conversions if we created them
+        if temp_neg_png and os.path.exists(temp_neg_png):
             shutil.rmtree(temp_neg_png)
             log("Cleaned up temporary negative PNGs.")
 
+        step(90, "Writing YAML config...")
         # 5. Create data.yaml
-        yaml_content = f"""path: {os.path.abspath(self.base_output)}
+        yaml_content = f"""path: {os.path.abspath(self.base_output).replace(os.sep, '/')}
 train: train/images
 val: val/images
 
@@ -261,6 +323,7 @@ names:
             f.write(yaml_content)
 
         # 6. Write CSV manifest
+        step(94, "Writing CSV manifest...")
         csv_path = os.path.join(self.base_output, 'dataset.csv')
         with open(csv_path, 'w', newline='') as csvfile:
             writer = csv.writer(csvfile)
@@ -273,5 +336,104 @@ names:
         log(f"Train samples: {len(train_samples)}")
         log(f"Val samples: {len(val_samples)}")
         log(f"Total original: {len(all_samples)} | Augmented copies added: {aug_pos}")
-        log(f"CSV manifest saved to: {csv_path}")
-        log(f"YAML config saved to: {self.yaml_path}")
+        log(f"CSV manifest saved to: {csv_path.replace(os.sep, '/')}")
+        log(f"YAML config saved to: {self.yaml_path.replace(os.sep, '/')}")
+        step(100, "Complete!")
+
+        # 7. Optionally export COCO format (required for RF-DETR)
+        if also_export_coco:
+            log("\nExporting COCO format dataset...")
+            self.export_coco(log)
+
+    def export_coco(self, log=print):
+        # Converts the prepared YOLO split into COCO JSON format under data/coco/.
+        # Bounding boxes are derived from the polygon label coords.
+        # Required by RF-DETR which expects COCO-style annotations.
+        coco_root = "data/coco"
+        categories = [{"id": 1, "name": "fabella", "supercategory": "anatomy"}]
+
+        # RF-DETR (Roboflow layout) uses 'valid' for validation, not 'val'
+        split_map = {"train": "train", "val": "valid"}
+        for split in ["train", "val"]:
+            split_dst = split_map[split]
+            img_src  = os.path.join(self.base_output, split, "images")
+            lbl_src  = os.path.join(self.base_output, split, "labels")
+            img_dst  = os.path.join(coco_root, split_dst)
+            ann_dst  = os.path.join(coco_root, "annotations")
+
+            os.makedirs(img_dst, exist_ok=True)
+            os.makedirs(ann_dst, exist_ok=True)
+
+            if not os.path.exists(img_src):
+                log(f"  Skipping COCO {split_dst}: {img_src} not found.")
+                continue
+
+            coco = {"images": [], "annotations": [], "categories": categories}
+            img_id  = 0
+            ann_id  = 0
+
+            for fname in sorted(os.listdir(img_src)):
+                if not fname.lower().endswith('.png'):
+                    continue
+
+                src_path = os.path.join(img_src, fname)
+                dst_path = os.path.join(img_dst, fname)
+                if not os.path.exists(dst_path):
+                    shutil.copy(src_path, dst_path)
+
+                img = cv2.imread(src_path, cv2.IMREAD_UNCHANGED)
+                if img is None:
+                    continue
+                h, w = img.shape[:2]
+                img_id += 1
+                coco["images"].append({"id": img_id, "file_name": fname,
+                                        "width": w, "height": h})
+
+                # Find matching label
+                stem    = os.path.splitext(fname)[0]
+                lbl_path = os.path.join(lbl_src, stem + ".txt")
+                labels  = augmentor.read_labels(lbl_path) if os.path.exists(lbl_path) else []
+
+                for cid, coords in labels:
+                    pts = augmentor.pair_points(coords)
+                    # De-normalise to pixel coords
+                    px_pts = [(x * w, y * h) for x, y in pts]
+                    xs = [p[0] for p in px_pts]
+                    ys = [p[1] for p in px_pts]
+                    x_min, y_min = max(0, min(xs)), max(0, min(ys))
+                    bw = min(w, max(xs)) - x_min
+                    bh = min(h, max(ys)) - y_min
+                    area   = bw * bh
+                    # Flat segmentation polygon for COCO
+                    seg    = [v for p in px_pts for v in (round(p[0], 2), round(p[1], 2))]
+                    ann_id += 1
+                    coco["annotations"].append({
+                        "id": ann_id,
+                        "image_id": img_id,
+                        "category_id": 1,  # fabella
+                        "segmentation": [seg],
+                        "bbox": [round(x_min, 2), round(y_min, 2), round(bw, 2), round(bh, 2)],
+                        "area": round(area, 2),
+                        "iscrowd": 0,
+                    })
+
+            # Standard path (for reference / other tools)
+            json_path = os.path.join(ann_dst, f"instances_{split}.json")
+            with open(json_path, "w") as f:
+                json.dump(coco, f)
+
+            # RF-DETR / Roboflow COCO layout: _annotations.coco.json inside each split folder
+            rfdetr_json_path = os.path.join(img_dst, "_annotations.coco.json")
+            with open(rfdetr_json_path, "w") as f:
+                json.dump(coco, f)
+
+            log(f"  COCO {split_dst}: {img_id} images, {ann_id} annotations -> {json_path.replace(os.sep, '/')}")
+
+        # RF-DETR also requires a test/ split. Mirror valid/ -> test/.
+        valid_dir = os.path.join(coco_root, "valid")
+        test_dir  = os.path.join(coco_root, "test")
+        if os.path.isdir(valid_dir):
+            if os.path.isdir(test_dir):
+                shutil.rmtree(test_dir)
+            shutil.copytree(valid_dir, test_dir)
+            log(f"  COCO test: mirrored from valid/ -> data/coco/test/")

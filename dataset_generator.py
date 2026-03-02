@@ -164,7 +164,15 @@ class ScrollableFrame(tk.Frame):
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        canvas.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units'))
+        # Bind scroll only while the mouse is inside this frame to avoid
+        # firing on destroyed widgets after the modal closes.
+        def _on_scroll(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units')
+
+        canvas.bind('<Enter>', lambda e: canvas.bind_all('<MouseWheel>', _on_scroll))
+        canvas.bind('<Leave>', lambda e: canvas.unbind_all('<MouseWheel>'))
+        self.inner.bind('<Enter>', lambda e: canvas.bind_all('<MouseWheel>', _on_scroll))
+        self.inner.bind('<Leave>', lambda e: canvas.unbind_all('<MouseWheel>'))
 
 
 class SectionCard(tk.Frame):
