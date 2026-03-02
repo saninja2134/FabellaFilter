@@ -8,10 +8,6 @@ os.environ.setdefault('NO_ALBUMENTATIONS_UPDATE', '1')
 import tkinter as tk
 from tkinter import ttk, messagebox
 import threading
-import sys
-
-# Add the parent directory to sys.path to allow importing from UI package
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dicom_converter import DicomConverter
 from dataset_cleaner import FabellaCleaner
