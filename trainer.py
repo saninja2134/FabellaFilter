@@ -1,6 +1,5 @@
 # Unified model trainer supporting YOLO (seg/obb), RT-DETR, and RF-DETR architectures.
 import os
-import re
 import sys
 import json
 import torch
@@ -47,21 +46,32 @@ class ModelRegistry:
             for name in sorted(os.listdir(runs_dir)):
                 if name in known:
                     continue
-                weights = os.path.join(runs_dir, name, "weights", "best.pt")
-                if os.path.exists(weights):
-                    arch, size = ModelRegistry._infer_from_name(name)
-                    records.append({
-                        "run_name":     name,
-                        "arch":         arch,
-                        "version":      "",
-                        "size":         size,
-                        "epochs":       "?",
-                        "imgsz":        "?",
-                        "batch":        "?",
-                        "date":         "unknown",
-                        "weights_path": weights,
-                        "results_plot": os.path.join(runs_dir, name, "results.png"),
-                    })
+                run_path = os.path.join(runs_dir, name)
+                # Ultralytics: weights/best.pt
+                weights = os.path.join(run_path, "weights", "best.pt")
+                if not os.path.exists(weights):
+                    # RF-DETR: checkpoint_best_ema.pth at run root
+                    for ckpt in ("checkpoint_best_ema.pth", "checkpoint_best_regular.pth",
+                                 "checkpoint_best_total.pth", "checkpoint.pth"):
+                        candidate = os.path.join(run_path, ckpt)
+                        if os.path.exists(candidate):
+                            weights = candidate
+                            break
+                if not os.path.exists(weights):
+                    continue
+                arch, size = ModelRegistry._infer_from_name(name)
+                records.append({
+                    "run_name":     name,
+                    "arch":         arch,
+                    "version":      "",
+                    "size":         size,
+                    "epochs":       "?",
+                    "imgsz":        "?",
+                    "batch":        "?",
+                    "date":         "unknown",
+                    "weights_path": weights,
+                    "results_plot": os.path.join(run_path, "results.png"),
+                })
         return records
 
     @staticmethod
@@ -76,10 +86,11 @@ class ModelRegistry:
         size     = parts[-1] if len(parts) > 1 else "?"
         arch_key = parts[0]  if len(parts) > 1 else stripped
         arch_map = {
-            "yolo_seg": "YOLO Seg",
-            "yolo_obb": "YOLO OBB",
-            "rt_detr":  "RT-DETR",
-            "rf_detr":  "RF-DETR",
+            "yolo_seg":    "YOLO Seg",
+            "yolo_obb":    "YOLO OBB",
+            "rt_detr":     "RT-DETR",
+            "rf_detr":     "RF-DETR",
+            "rf_detr_seg": "RF-DETR Seg",
         }
         return arch_map.get(arch_key, arch_key), size
 
@@ -115,7 +126,14 @@ ARCHITECTURES = {
         "backend":  "rfdetr",
         "task":     "detect",
         "format":   "coco",
-        "sizes":    ["base", "large"],
+        "sizes":    ["n", "s", "m", "l"],
+        "versions": [""],
+    },
+    "RF-DETR Seg": {
+        "backend":  "rfdetr",
+        "task":     "segment",
+        "format":   "coco",
+        "sizes":    ["n", "s", "m", "l", "xl", "2xl"],
         "versions": [""],
     },
 }
@@ -126,6 +144,28 @@ def get_arch_info(arch):
     if arch not in ARCHITECTURES:
         raise ValueError(f"Unknown architecture: {arch}. Choose from: {list(ARCHITECTURES)}")
     return ARCHITECTURES[arch]
+
+
+# RF-DETR class name maps (shared by trainer + tester)
+RFDETR_DET_MAP = {
+    "n": "RFDETRNano",   "s": "RFDETRSmall",
+    "m": "RFDETRMedium", "l": "RFDETRLarge",
+}
+RFDETR_SEG_MAP = {
+    "n": "RFDETRSegNano",   "s": "RFDETRSegSmall",
+    "m": "RFDETRSegMedium", "l": "RFDETRSegLarge",
+    "xl": "RFDETRSegXLarge", "2xl": "RFDETRSeg2XLarge",
+}
+
+
+def get_rfdetr_class(task, size):
+    """Return (class_name, class_object) for an RF-DETR variant, or raise."""
+    cls_map = RFDETR_SEG_MAP if task == "segment" else RFDETR_DET_MAP
+    cls_name = cls_map.get(size)
+    if cls_name is None:
+        raise ValueError(f"Unknown RF-DETR size '{size}'. Options: {list(cls_map)}")
+    import rfdetr as _rfdetr_mod
+    return cls_name, getattr(_rfdetr_mod, cls_name)
 
 
 def build_yolo_model_name(arch, version, size):
@@ -180,6 +220,10 @@ class ModelTrainer:
         self.coco_dir   = f"data/coco"
         self.results_plot_path = None   # set after training if a chart was generated
 
+    @property
+    def run_dir(self):
+        """Full path to this training run's output directory."""
+        return os.path.join(self.output_dir, self.run_name)
     # ── PUBLIC API ────────────────────────────────────────────────
 
     def train(self, progress_callback=None):
@@ -240,15 +284,35 @@ class ModelTrainer:
             workers=4,
             project=self.output_dir,
             name=self.run_name,
-            patience=20,
+            patience=30,  # Small objects need longer to converge
             save=True,
-            fliplr=0.5,
-            flipud=0.2,
-            hsv_h=0.0,
-            hsv_s=0.0,
-            hsv_v=0.0,
-            mixup=0.1,
-            mosaic=1.0,
+
+            # ── Augmentation: tuned for small sesamoid bone on X-ray ──
+            mosaic=0.0,       # OFF — mosaic shrinks already-tiny fabella
+            mixup=0.0,        # OFF — blurs subtle bone density contrast
+            copy_paste=0.0,   # OFF — anatomically invalid random placement
+            erasing=0.0,      # OFF — would occlude the tiny target
+
+            # Geometric augmentation (mild — anatomy is position-sensitive)
+            scale=0.4,        # Scale variation for different knee sizes
+            shear=5,          # Mild shear
+            degrees=5.0,      # Slight rotation for patient positioning variation
+            translate=0.15,   # Positional shift — fabella location varies
+
+            # Flip policy for lateral knee X-rays
+            fliplr=0.5,       # OK — handles left/right knee films
+            flipud=0.0,       # OFF — vertical flip breaks anatomical orientation
+
+            # X-rays are grayscale — disable colour augmentation
+            hsv_h=0.0,        # No hue (meaningless on grayscale)
+            hsv_s=0.0,        # No saturation (meaningless on grayscale)
+            hsv_v=0.15,       # Mild brightness — simulates exposure variation
+
+            # Loss weights: emphasise localisation of <1% image-area target
+            cls=1.5,          # Classification loss weight
+            box=10.0,         # Bbox loss — high for precise small-object localisation
+            seg=2.5,          # Seg loss — upweighted because mask area is tiny
+            dfl=1.5,          # Distribution focal loss
         )
 
         best = os.path.join(self.output_dir, self.run_name, "weights", "best.pt")
@@ -259,148 +323,110 @@ class ModelTrainer:
         log(f"\nTraining complete! Best model: {best}")
 
     def _train_rfdetr(self, log):
-        # Patch supervision < 0.26 which dropped xyxy_to_xywh (rfdetr still needs it)
+        # Patch supervision < 0.26 missing xyxy_to_xywh (rfdetr still needs it)
         try:
             import supervision as _sv
-            import numpy as _np
             if not hasattr(_sv, 'xyxy_to_xywh'):
-                def _xyxy_to_xywh(xyxy):
-                    arr = _np.array(xyxy, dtype=float)
-                    result = arr.copy()
-                    result[..., 2] = arr[..., 2] - arr[..., 0]  # w = x2 - x1
-                    result[..., 3] = arr[..., 3] - arr[..., 1]  # h = y2 - y1
-                    return result
-                _sv.xyxy_to_xywh = _xyxy_to_xywh
+                import numpy as _np
+                _sv.xyxy_to_xywh = lambda xyxy: _np.column_stack([
+                    xyxy[..., :2], xyxy[..., 2:] - xyxy[..., :2]])
         except ImportError:
             pass
 
+        # ── Dynamic class selection ──
         try:
-            from rfdetr import RFDETRBase, RFDETRLarge
+            cls_name, model_cls = get_rfdetr_class(self.task, self.size)
+        except ValueError as e:
+            log(f"Error: {e}")
+            return
         except (ImportError, ModuleNotFoundError) as e:
             log(f"Error: Cannot import rfdetr ({e})")
-            log("This is usually a dependency conflict. Try:")
-            log("  pip install -U transformers peft")
             log("  pip install -U rfdetr")
             return
+        except AttributeError:
+            log(f"Error: RF-DETR class not found. For XL/2XL: pip install rfdetr[plus]")
+            return
 
-        if not os.path.exists(self.coco_dir):
-            # Auto-generate COCO from existing YOLO data if available
+        if not os.path.isdir(os.path.join(self.coco_dir, "train")):
+            # Try auto-generating from existing YOLO data
             yolo_seg = os.path.join("data", "yolo", "seg")
             if os.path.isdir(yolo_seg):
                 log("COCO format not found — auto-generating from YOLO data...")
                 try:
-                    from yolo_preparer import YoloPreparer
-                    prep = YoloPreparer(task="segment")
-                    prep.export_coco(log)
-                    log("COCO export complete.")
+                    from preparer import YoloPreparer
+                    YoloPreparer(task="segment").export_coco(log)
                 except Exception as e:
                     log(f"Error generating COCO: {e}")
                     return
             else:
-                log(f"Error: {self.coco_dir} not found and no YOLO data to convert.")
-                log("Run 'Prepare Dataset' first.")
+                log(f"Error: {self.coco_dir} not found. Run 'Prepare Dataset' first.")
                 return
 
-        # RF-DETR expects _annotations.coco.json inside each split folder.
-        # Roboflow layout: train/ and valid/ (not val/).
-        import shutil as _shutil
-        # Rename val/ -> valid/ if it exists and valid/ doesn't yet
-        old_val = os.path.join(self.coco_dir, "val")
-        new_val = os.path.join(self.coco_dir, "valid")
-        if os.path.isdir(old_val) and not os.path.isdir(new_val):
-            os.rename(old_val, new_val)
-            log("  Renamed data/coco/val -> data/coco/valid")
+        log(f"Loading RF-DETR {cls_name}...")
 
-        # Auto-migrate from the standard annotations/ layout if _annotations.coco.json is missing
-        split_map = {"train": "train", "val": "valid"}
-        for split, split_dst in split_map.items():
-            rfdetr_ann = os.path.join(self.coco_dir, split_dst, "_annotations.coco.json")
-            fallback    = os.path.join(self.coco_dir, "annotations", f"instances_{split}.json")
-            if not os.path.exists(rfdetr_ann):
-                os.makedirs(os.path.join(self.coco_dir, split_dst), exist_ok=True)
-                if os.path.exists(fallback):
-                    _shutil.copy(fallback, rfdetr_ann)
-                    log(f"  Migrated {split} annotations to {split_dst}/_annotations.coco.json")
-                else:
-                    log(f"Warning: no annotations found for '{split}' split — re-run Prepare Dataset.")
+        # Snap resolution to nearest multiple of 32 (patch_size × num_windows)
+        divisor = 32
+        resolution = max(divisor, round(self.imgsz / divisor) * divisor)
 
-        # RF-DETR also requires test/ split — mirror valid/ if test/ is absent
-        valid_dir = os.path.join(self.coco_dir, "valid")
-        test_dir  = os.path.join(self.coco_dir, "test")
-        if os.path.isdir(valid_dir) and not os.path.isdir(test_dir):
-            _shutil.copytree(valid_dir, test_dir)
-            log("  Created data/coco/test/ (mirrored from valid/)")
+        # Use default constructor (loads correct pretrained weights automatically)
+        model = model_cls()
 
+        # Effective batch = batch_size × grad_accum_steps
+        grad_accum = max(1, 16 // self.batch)
+        warmup = min(3, max(1, self.epochs // 10))
 
-        log(f"Loading RF-DETR {self.size}...")
+        log(f"  Resolution: {resolution}  |  Effective batch: {self.batch}×{grad_accum}={self.batch * grad_accum}")
+        log(f"  Warmup: {warmup} epochs  |  Early stopping patience: 20")
+        log("  TensorBoard logging enabled — run: tensorboard --logdir output/runs")
 
-        # Suppress noisy warnings that spam from dataloader worker processes
-        os.environ.setdefault('NO_ALBUMENTATIONS_UPDATE', '1')
-        os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')
-        os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
-
-        model = RFDETRLarge() if self.size == "large" else RFDETRBase()
-
-        log(f"Starting RF-DETR training (epochs={self.epochs}, batch={self.batch})...")
-
-        # ── Capture stdout+stderr to parse per-epoch metrics ──────
-        class _TeeStream:
-            def __init__(self, orig, lines):
-                self._orig  = orig
-                self._lines = lines
-                self._buf   = ""
-            def write(self, data):
-                self._orig.write(data)
-                self._buf += data
-                while '\n' in self._buf:
-                    line, self._buf = self._buf.split('\n', 1)
-                    self._lines.append(line)
-                return len(data)
-            def flush(self): self._orig.flush()
-            def __getattr__(self, n): return getattr(self._orig, n)
-
-        captured = []
-        old_out, old_err = sys.stdout, sys.stderr
-        sys.stdout = _TeeStream(old_out, captured)
-        sys.stderr = _TeeStream(old_err, captured)
         try:
             model.train(
+                # ── Dataset ──
                 dataset_dir=self.coco_dir,
+
+                # ── Core training ──
                 epochs=self.epochs,
                 batch_size=self.batch,
-                grad_accum_steps=max(1, 8 // self.batch),
+                grad_accum_steps=grad_accum,
                 lr=1e-4,
+                warmup_epochs=warmup,
+
+                # ── EMA ──
+                use_ema=True,
+                ema_decay=0.9997,
+                ema_tau=100,
+
+                # ── Early stopping ──
+                early_stopping=True,
+                early_stopping_patience=20,
+                early_stopping_min_delta=0.001,
+                early_stopping_use_ema=True,
+
+                # ── Checkpoints / output ──
                 output_dir=os.path.join(self.output_dir, self.run_name),
-                run_test=False,
+                checkpoint_interval=10,
+
+                # ── Resolution ──
+                resolution=resolution,
+
+                # ── Logging ──
+                tensorboard=True,
+
+                # ── Run test set after training ──
+                run_test=True,
             )
             log(f"\nRF-DETR training complete! Output: {self.output_dir}/{self.run_name}")
             ModelRegistry.register(self._make_registry_entry())
         except Exception as e:
             log(f"Training error: {e}")
-        finally:
-            sys.stdout = old_out
-            sys.stderr = old_err
 
-        # Parse epoch summary lines and generate results chart
-        epoch_metrics = []
-        for line in captured:
-            m = re.search(
-                r'Epoch (\d+) stats:.*\bclass_error:\s*([\d.]+).*\bloss:\s*[\d.]+\s*\(([\d.]+)\)',
-                line
-            )
-            if m:
-                epoch_metrics.append({
-                    'epoch': int(m.group(1)),
-                    'class_error': float(m.group(2)),
-                    'loss': float(m.group(3)),
-                })
-        if epoch_metrics:
-            run_dir = os.path.join(self.output_dir, self.run_name)
-            plot = self._plot_rfdetr_results(epoch_metrics, run_dir)
-            if plot:
-                self.results_plot_path = plot
-                log(f"Results chart saved: {plot}")
     def _make_registry_entry(self):
+        run_dir = os.path.join(self.output_dir, self.run_name)
+        # Ultralytics saves to weights/best.pt; RF-DETR saves checkpoint_best_ema.pth at run root
+        if self.backend == "rfdetr":
+            weights = self._find_rfdetr_best(run_dir)
+        else:
+            weights = os.path.join(run_dir, "weights", "best.pt")
         return {
             "run_name":     self.run_name,
             "arch":         self.arch,
@@ -410,43 +436,16 @@ class ModelTrainer:
             "imgsz":        self.imgsz,
             "batch":        self.batch,
             "date":         datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "weights_path": os.path.join(self.output_dir, self.run_name, "weights", "best.pt").replace(os.sep, "/"),
-            "results_plot": os.path.join(self.output_dir, self.run_name, "results.png").replace(os.sep, "/"),
+            "weights_path": weights.replace(os.sep, "/"),
+            "results_plot": os.path.join(run_dir, "results.png").replace(os.sep, "/"),
         }
 
-    def _plot_rfdetr_results(self, metrics, out_dir):
-        """Generate and save a training results chart from per-epoch metrics."""
-        try:
-            import matplotlib
-            matplotlib.use('Agg')
-            import matplotlib.pyplot as plt
-
-            epochs = [m['epoch'] for m in metrics]
-            losses = [m['loss'] for m in metrics]
-            errors = [m['class_error'] for m in metrics]
-
-            fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-            fig.suptitle(f'RF-DETR Training — {self.run_name}', fontsize=13, fontweight='bold')
-
-            axes[0].plot(epochs, losses, color='#2196F3', linewidth=1.8)
-            axes[0].set_title('Total Loss')
-            axes[0].set_xlabel('Epoch')
-            axes[0].set_ylabel('Loss')
-            axes[0].grid(True, alpha=0.3)
-
-            axes[1].plot(epochs, errors, color='#F44336', linewidth=1.8)
-            axes[1].set_title('Class Error (%)')
-            axes[1].set_xlabel('Epoch')
-            axes[1].set_ylabel('Error %')
-            axes[1].set_ylim(0, 105)
-            axes[1].grid(True, alpha=0.3)
-
-            plt.tight_layout()
-            os.makedirs(out_dir, exist_ok=True)
-            path = os.path.join(out_dir, 'results.png')
-            plt.savefig(path, dpi=150, bbox_inches='tight')
-            plt.close(fig)
-            return path
-        except Exception as e:
-            print(f"[plot] {e}")
-            return None
+    @staticmethod
+    def _find_rfdetr_best(run_dir):
+        """Return the best RF-DETR checkpoint path (prefer EMA > regular > total > last)."""
+        for name in ("checkpoint_best_ema.pth", "checkpoint_best_regular.pth",
+                     "checkpoint_best_total.pth", "checkpoint.pth"):
+            p = os.path.join(run_dir, name)
+            if os.path.exists(p):
+                return p
+        return os.path.join(run_dir, "checkpoint_best_ema.pth")  # fallback

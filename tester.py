@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import os
 import shutil
-from model_trainer import ARCHITECTURES, get_arch_info
+from trainer import ARCHITECTURES, get_arch_info, get_rfdetr_class
 
 
 class ModelTester:
@@ -29,14 +29,13 @@ class ModelTester:
             print(msg)
             if progress_callback: progress_callback(msg)
 
+        # Try .pt then .pth for RF-DETR checkpoints
         if not os.path.exists(self.model_path):
-            # RF-DETR saves checkpoint in a different location; try .pth too
             alt = self.model_path.replace(".pt", ".pth")
             if os.path.exists(alt):
                 self.model_path = alt
             else:
                 log(f"Error: model not found at {self.model_path}")
-                log("Have you trained the model first?")
                 return
 
         # Prepare output dirs
@@ -140,15 +139,23 @@ class ModelTester:
 
     def _test_rfdetr(self, batch, det_dir, undet_dir, log):
         try:
-            from rfdetr import RFDETRBase, RFDETRLarge
+            cls_name, model_cls = get_rfdetr_class(self.task, self.size)
+        except ValueError as e:
+            log(f"Error: {e}")
+            return
         except ImportError:
             log("Error: rfdetr package not installed. Run: pip install rfdetr")
             return
+        except AttributeError:
+            log(f"Error: RF-DETR class not found. For XL/2XL: pip install rfdetr[plus]")
+            return
 
-        model_cls = RFDETRLarge if self.size == "large" else RFDETRBase
+        log(f"Loading {cls_name} from {self.model_path}...")
         try:
             model = model_cls(pretrain_weights=self.model_path)
-        except Exception:
+        except Exception as e:
+            log(f"Error loading finetuned weights: {e}")
+            log("Falling back to default pretrained weights...")
             model = model_cls()
 
         from PIL import Image as PILImage
@@ -161,15 +168,34 @@ class ModelTester:
             try:
                 pil_img  = PILImage.open(img_path).convert("RGB")
                 detects  = model.predict(pil_img, threshold=0.5)
+                # rfdetr returns supervision.Detections with .xyxy, .confidence, .class_id
+                # Seg variants also include .mask (N, H, W boolean arrays)
                 has_det  = len(detects) > 0
 
-                for det in detects:
-                    # rfdetr returns [x1,y1,x2,y2,score,label] or similar
-                    if len(det) >= 5:
-                        x1, y1, x2, y2, conf = int(det[0]), int(det[1]), int(det[2]), int(det[3]), float(det[4])
-                        cv2.rectangle(img_visual, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        cv2.putText(img_visual, f"{conf:.2f}", (x2 + 5, y1 + 15),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                if has_det:
+                    boxes = detects.xyxy                   # (N, 4) ndarray
+                    confs = detects.confidence              # (N,) ndarray
+                    masks = getattr(detects, 'mask', None)  # (N, H, W) or None
+
+                    if masks is not None and len(masks) > 0:
+                        # Draw segmentation masks + bounding boxes
+                        overlay = img_visual.copy()
+                        for mask, box, conf in zip(masks, boxes, confs):
+                            # mask is a boolean (H, W) array
+                            color = (0, 255, 0)
+                            overlay[mask] = color
+                            x1, y1, x2, y2 = box.astype(int)
+                            cv2.rectangle(img_visual, (x1, y1), (x2, y2), color, 2)
+                            cv2.putText(img_visual, f"{conf:.2f}", (x2 + 5, y1 + 15),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                        cv2.addWeighted(overlay, 0.3, img_visual, 0.7, 0, img_visual)
+                    else:
+                        # Detection-only: draw bounding boxes
+                        for box, conf in zip(boxes, confs):
+                            x1, y1, x2, y2 = box.astype(int)
+                            cv2.rectangle(img_visual, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                            cv2.putText(img_visual, f"{conf:.2f}", (x2 + 5, y1 + 15),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             except Exception as e:
                 log(f"  Inference error on {img_name}: {e}")
                 has_det = False
