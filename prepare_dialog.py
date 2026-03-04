@@ -164,7 +164,15 @@ class ScrollableFrame(tk.Frame):
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        canvas.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units'))
+        # Bind scroll only while the mouse is inside this frame to avoid
+        # firing on destroyed widgets after the modal closes.
+        def _on_scroll(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), 'units')
+
+        canvas.bind('<Enter>', lambda e: canvas.bind_all('<MouseWheel>', _on_scroll))
+        canvas.bind('<Leave>', lambda e: canvas.unbind_all('<MouseWheel>'))
+        self.inner.bind('<Enter>', lambda e: canvas.bind_all('<MouseWheel>', _on_scroll))
+        self.inner.bind('<Leave>', lambda e: canvas.unbind_all('<MouseWheel>'))
 
 
 class SectionCard(tk.Frame):
@@ -273,8 +281,8 @@ class DatasetGeneratorModal(tk.Toplevel):
         title_bar.pack(fill=tk.X)
         tk.Label(title_bar, text="Dataset Generation & Augmentation",
                 font=('Segoe UI', 13, 'bold'), bg="#007ACC", fg='white').pack(side=tk.LEFT)
-        task_badge = "SEGMENTATION" if self.task == "segment" else "OBB"
-        tk.Label(title_bar, text=task_badge, font=('Segoe UI', 9, 'bold'),
+        task_badge = "SEG" if self.task == "segment" else "OBB" if self.task == "obb" else "DET"
+        tk.Label(title_bar, text=f"{task_badge} + COCO + DET", font=('Segoe UI', 9, 'bold'),
                 bg='#005A9E', fg='white', padx=8, pady=3).pack(side=tk.RIGHT)
 
         # Main scroll area
@@ -314,7 +322,7 @@ class DatasetGeneratorModal(tk.Toplevel):
                  relief=tk.FLAT, padx=20, cursor='hand2',
                  command=self.destroy).pack(side=tk.LEFT)
 
-        self.gen_btn = tk.Button(footer, text="⚡  Generate YOLO Dataset",
+        self.gen_btn = tk.Button(footer, text="⚡  Generate Dataset (All Formats)",
                                 font=('Segoe UI', 11, 'bold'),
                                 bg=ACCENT_GREEN, fg='white',
                                 activebackground='#388E3C',
