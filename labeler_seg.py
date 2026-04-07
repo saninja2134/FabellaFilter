@@ -2,6 +2,7 @@
 import cv2
 import os
 import numpy as np
+import shutil
 
 class SegLabeler:
     # An OpenCV-based tool for annotating images with Segmentation Polygons.
@@ -13,6 +14,10 @@ class SegLabeler:
         # label_dir (str): Directory to save the labels.
         self.image_dir = image_dir
         self.label_dir = label_dir
+        image_root = os.path.dirname(os.path.normpath(image_dir))
+        image_folder = os.path.basename(os.path.normpath(image_dir))
+        self.labeled_dir = os.path.join(image_root, f"{image_folder}_labeled")
+        self.unlabeled_dir = os.path.join(image_root, f"{image_folder}_unlabeled")
         
         if os.path.exists(image_dir):
             self.images = [f for f in os.listdir(image_dir) if f.lower().endswith('.png')]
@@ -22,6 +27,8 @@ class SegLabeler:
             
         if not os.path.exists(label_dir):
             os.makedirs(label_dir)
+        os.makedirs(self.labeled_dir, exist_ok=True)
+        os.makedirs(self.unlabeled_dir, exist_ok=True)
             
         self.index = 0
         self.polygons = [] # List of completed polygons (each is a list of (x,y) tuples)
@@ -35,6 +42,37 @@ class SegLabeler:
         self.offset = [50, 50] # Screen-space offset [x, y]
         self.dragging = False
         self.last_mouse = [0, 0]
+
+        self.sync_label_folders()
+
+    def get_image_path(self, image_name):
+        return os.path.join(self.image_dir, image_name)
+
+    def get_label_path(self, image_name):
+        txt_name = os.path.splitext(image_name)[0] + ".txt"
+        return os.path.join(self.label_dir, txt_name)
+
+    def has_saved_label(self, image_name):
+        label_path = self.get_label_path(image_name)
+        return os.path.exists(label_path) and os.path.getsize(label_path) > 0
+
+    def sync_image_bucket(self, image_name):
+        src_path = self.get_image_path(image_name)
+        if not os.path.exists(src_path):
+            return
+
+        labeled_path = os.path.join(self.labeled_dir, image_name)
+        unlabeled_path = os.path.join(self.unlabeled_dir, image_name)
+        target_path = labeled_path if self.has_saved_label(image_name) else unlabeled_path
+        other_path = unlabeled_path if target_path == labeled_path else labeled_path
+
+        shutil.copy2(src_path, target_path)
+        if os.path.exists(other_path):
+            os.remove(other_path)
+
+    def sync_label_folders(self):
+        for image_name in self.images:
+            self.sync_image_bucket(image_name)
 
     def mouse_callback(self, event, x, y, flags, param):
         # Handles mouse events for drawing, panning, and zooming.
@@ -149,8 +187,8 @@ class SegLabeler:
             
         im_h, im_w = self.current_image.shape[:2]
         txt_name = os.path.splitext(self.images[self.index])[0] + ".txt"
-        
-        with open(os.path.join(self.label_dir, txt_name), 'w') as f:
+
+        with open(self.get_label_path(self.images[self.index]), 'w') as f:
             for poly in self.polygons:
                 flat = []
                 for x, y in poly:
@@ -160,6 +198,8 @@ class SegLabeler:
                     flat.append(nx)
                     flat.append(ny)
                 f.write(f"0 {' '.join([f'{v:.6f}' for v in flat])}\n")
+
+            self.sync_image_bucket(self.images[self.index])
                 
         print(f"Saved: {txt_name}")
 
@@ -168,8 +208,9 @@ class SegLabeler:
         self.polygons = []
         self.current_polygon = []
         
-        txt_name = os.path.splitext(self.images[self.index])[0] + ".txt"
-        txt_path = os.path.join(self.label_dir, txt_name)
+        image_name = self.images[self.index]
+        txt_path = self.get_label_path(image_name)
+        self.sync_image_bucket(image_name)
         
         if not os.path.exists(txt_path) or self.current_image is None:
             return

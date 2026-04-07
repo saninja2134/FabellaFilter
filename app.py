@@ -1,5 +1,6 @@
 # Main application module that integrates all tools into a single UI.
 import os
+import queue
 # Suppress verbose warnings from TensorFlow and Albumentations before any imports
 os.environ.setdefault('TF_ENABLE_ONEDNN_OPTS', '0')
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '3')
@@ -18,6 +19,8 @@ from preparer import YoloPreparer
 from trainer import ModelTrainer, ModelRegistry, ARCHITECTURES
 from tester import ModelTester
 from prepare_dialog import DatasetGeneratorModal
+from shape_analysis import ShapeAnalysisTab
+from classifier_utils import CLASSIFIER_ARCH, default_imgsz_for_backbone
 
 # Colors
 BG_COLOR = "#1E1E1E"
@@ -86,6 +89,158 @@ class PrepareProgressWindow(tk.Toplevel):
         self._log_text.see(tk.END)
         self._log_text.config(state=tk.DISABLED)
 
+
+class AutoLabelerConfigDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Auto-Label Model")
+        self.configure(bg=BG_COLOR)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.result = None
+
+        self.options = []
+        if os.path.exists("rf-detr-medium-seg-trained.pt"):
+            self.options.append({
+                "label": "RF-DETR Medium Seg (trained)",
+                "backend": "rfdetr_seg",
+                "path": "rf-detr-medium-seg-trained.pt",
+            })
+        if os.path.exists("sam3.pt"):
+            self.options.append({
+                "label": "SAM3 Segment-Everything",
+                "backend": "sam3",
+                "path": "sam3.pt",
+            })
+
+        container = tk.Frame(self, bg=BG_COLOR, padx=18, pady=16)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(
+            container,
+            text="Choose which model should propose masks for review.",
+            font=("Segoe UI", 10),
+            bg=BG_COLOR,
+            fg=FG_COLOR,
+        ).pack(anchor=tk.W, pady=(0, 10))
+
+        tk.Label(container, text="Proposal Model:", bg=BG_COLOR, fg=FG_COLOR).pack(anchor=tk.W)
+        self.model_var = tk.StringVar()
+        self.model_cb = ttk.Combobox(container, textvariable=self.model_var, state="readonly", width=40)
+        self.model_cb["values"] = [o["label"] for o in self.options]
+        if self.options:
+            self.model_cb.current(0)
+        self.model_cb.pack(fill=tk.X, pady=(4, 10))
+        self.model_cb.bind("<<ComboboxSelected>>", self._sync_threshold_state)
+
+        tk.Label(container, text="Confidence Threshold:", bg=BG_COLOR, fg=FG_COLOR).pack(anchor=tk.W)
+        self.threshold_var = tk.StringVar(value="0.80")
+        self.threshold_entry = tk.Entry(
+            container,
+            textvariable=self.threshold_var,
+            width=10,
+            bg="#2D2D2D",
+            fg=FG_COLOR,
+            insertbackground=FG_COLOR,
+        )
+        self.threshold_entry.pack(anchor=tk.W, pady=(4, 4))
+
+        self.help_label = tk.Label(
+            container,
+            text=(
+                "RF-DETR mode uses the threshold directly. "
+                "I set 0.80 as the default because it is a safer starting point "
+                "than the older 0.58 recommendation."
+            ),
+            font=("Segoe UI", 9),
+            bg=BG_COLOR,
+            fg="#999999",
+            justify=tk.LEFT,
+            wraplength=420,
+        )
+        self.help_label.pack(anchor=tk.W, pady=(0, 12))
+
+        btns = tk.Frame(container, bg=BG_COLOR)
+        btns.pack(fill=tk.X)
+        tk.Button(
+            btns,
+            text="Cancel",
+            command=self.destroy,
+            bg=BUTTON_BG,
+            fg=FG_COLOR,
+            activebackground=BUTTON_ACTIVE,
+            relief=tk.FLAT,
+            padx=16,
+        ).pack(side=tk.RIGHT)
+        tk.Button(
+            btns,
+            text="Start",
+            command=self._on_confirm,
+            bg=ACCENT_COLOR,
+            fg="white",
+            activebackground=ACCENT_COLOR,
+            relief=tk.FLAT,
+            padx=16,
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+
+        self._sync_threshold_state()
+
+    def _selected_option(self):
+        idx = self.model_cb.current()
+        if idx < 0 or idx >= len(self.options):
+            return None
+        return self.options[idx]
+
+    def _sync_threshold_state(self, _event=None):
+        selected = self._selected_option()
+        if not selected:
+            self.threshold_entry.config(state="disabled")
+            return
+        if selected["backend"] == "rfdetr_seg":
+            self.threshold_entry.config(state="normal")
+            self.help_label.config(
+                text=(
+                    "RF-DETR mode uses the threshold directly. "
+                    "I set 0.80 as the default because it is a safer starting point "
+                    "than the older 0.58 recommendation."
+                )
+            )
+        else:
+            self.threshold_entry.config(state="disabled")
+            self.help_label.config(
+                text="SAM3 ignores the confidence threshold and runs segment-everything mode."
+            )
+
+    def _on_confirm(self):
+        selected = self._selected_option()
+        if not selected:
+            messagebox.showerror("No Model", "No proposal model is available.", parent=self)
+            return
+
+        threshold = 0.80
+        if selected["backend"] == "rfdetr_seg":
+            try:
+                threshold = float(self.threshold_var.get())
+            except ValueError:
+                messagebox.showerror("Invalid Threshold", "Threshold must be numeric.", parent=self)
+                return
+            if not (0.0 <= threshold <= 1.0):
+                messagebox.showerror(
+                    "Invalid Threshold",
+                    "Threshold must be between 0.0 and 1.0.",
+                    parent=self,
+                )
+                return
+
+        self.result = {
+            "proposal_backend": selected["backend"],
+            "proposal_model_path": selected["path"],
+            "proposal_threshold": threshold,
+        }
+        self.destroy()
+
+
 class FabellaApp:
     # The main application class for the Fabella Dataset Manager.
     def __init__(self, root):
@@ -94,8 +249,11 @@ class FabellaApp:
         # root (tk.Tk): The root Tkinter window.
         self.root = root
         self.root.title("Fabella Dataset Manager")
-        self.root.geometry("600x600")
+        self.root.geometry("1360x920")
+        self.root.minsize(1180, 760)
         self.root.configure(bg=BG_COLOR)
+        self._ui_task_queue = queue.SimpleQueue()
+        self._ui_pump_job = None
         
         # Header
         self.header_frame = tk.Frame(root, bg=BG_COLOR)
@@ -134,12 +292,15 @@ class FabellaApp:
         # Tabs
         self.tab_dataset = ttk.Frame(self.notebook)
         self.tab_model = ttk.Frame(self.notebook)
+        self.tab_shape = ttk.Frame(self.notebook)
         
         self.notebook.add(self.tab_dataset, text="Dataset Tools")
         self.notebook.add(self.tab_model, text="Model Training")
+        self.notebook.add(self.tab_shape, text="Shape Analysis")
         
         self.setup_dataset_tab()
         self.setup_model_tab()
+        self.setup_shape_analysis_tab()
         
         # Log Area
         self.log_frame = tk.Frame(root, bg=BG_COLOR)
@@ -155,10 +316,11 @@ class FabellaApp:
         # Footer / Status
         self.status_bar = tk.Label(root, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W, bg="#252526", fg="#CCCCCC")
         self.status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self._schedule_ui_pump()
 
     def log(self, message):
         # Appends a message to the log text area.
-        self.root.after(0, self.update_log_gui, message)
+        self._enqueue_ui(lambda message=message: self.update_log_gui(message))
 
     def update_log_gui(self, message):
         self.log_text.insert(tk.END, message + "\n")
@@ -166,7 +328,30 @@ class FabellaApp:
         
     def set_status(self, message):
         # Safely updates the status bar text from any thread.
-        self.root.after(0, lambda: self.status_bar.config(text=message))
+        self._enqueue_ui(lambda message=message: self.status_bar.config(text=message))
+
+    def _enqueue_ui(self, callback):
+        self._ui_task_queue.put(callback)
+
+    def _schedule_ui_pump(self):
+        self._ui_pump_job = self.root.after(50, self._drain_ui_queue)
+
+    def _drain_ui_queue(self):
+        self._ui_pump_job = None
+        try:
+            while True:
+                callback = self._ui_task_queue.get_nowait()
+                callback()
+        except queue.Empty:
+            pass
+        except tk.TclError:
+            return
+
+        try:
+            if self.root.winfo_exists():
+                self._schedule_ui_pump()
+        except tk.TclError:
+            return
 
     def heading(self, parent, text):
         # Creates a heading label.
@@ -268,7 +453,7 @@ class FabellaApp:
         self.create_action_button(
             container,
             "SAM3 Auto-Label",
-            "AI-assisted labeling: SAM3 proposes masks from existing labels, you approve/reject. Learns as you go.",
+            "AI-assisted labeling: choose SAM3 or the trained RF-DETR segmentation model, then approve/reject masks.",
             self.run_sam3_auto_labeler,
             color="#6A1B9A"
         )
@@ -315,8 +500,9 @@ class FabellaApp:
             row=1, column=0, padx=5, pady=5, sticky=tk.W)
         self.size_var = tk.StringVar(value="n")
         self.size_cb = ttk.Combobox(settings_frame, textvariable=self.size_var,
-                                    values=["n","s","m","l","x"], state="readonly", width=8)
+                                    values=["n","s","m","l","x"], state="readonly", width=20)
         self.size_cb.grid(row=1, column=1, padx=5, pady=5)
+        self.size_cb.bind("<<ComboboxSelected>>", self._on_size_change)
 
         # ── Row 1: Epochs / Batch ────────────────────────────────
         tk.Label(settings_frame, text="Epochs:", bg=BG_COLOR, fg=FG_COLOR).grid(
@@ -390,6 +576,19 @@ class FabellaApp:
             color="#C62828"
         )
 
+    def setup_shape_analysis_tab(self):
+        # Sets up the Shape Analysis tab.
+        ShapeAnalysisTab(
+            self.tab_shape,
+            bg_color=BG_COLOR,
+            fg_color=FG_COLOR,
+            accent_color=ACCENT_COLOR,
+            button_bg=BUTTON_BG,
+            button_active=BUTTON_ACTIVE,
+            log_callback=self.log,
+            status_callback=self.set_status,
+        )
+
     def run_in_thread(self, target, status_msg):
         # Runs a target function in a separate thread to keep UI responsive.
         def wrapper():
@@ -400,7 +599,7 @@ class FabellaApp:
             except Exception as e:
                 self.log(f"Error: {e}")
                 self.set_status("Error occurred")
-                messagebox.showerror("Error", str(e))
+                self._enqueue_ui(lambda e=e: messagebox.showerror("Error", str(e)))
 
         thread = threading.Thread(target=wrapper)
         thread.daemon = True
@@ -441,10 +640,17 @@ class FabellaApp:
         self._run_cv_tool(SegLabeler(), "Segmentation Labeler")
 
     def run_sam3_auto_labeler(self):
-        # Runs the SAM3 AI-assisted auto-labeler.
-        labeler = SAM3AutoLabeler()
-        self._run_cv_tool(labeler, "SAM3 Auto-Labeler")
-        self.log(f"SAM3 session: {labeler.stats['approved']} approved, "
+        # Runs the model-assisted auto-labeler.
+        dialog = AutoLabelerConfigDialog(self.root)
+        self.root.wait_window(dialog)
+        if not dialog.result:
+            return
+
+        labeler = SAM3AutoLabeler(**dialog.result)
+        tool_name = "RF-DETR Auto-Labeler" if labeler.proposal_backend == "rfdetr_seg" else "SAM3 Auto-Labeler"
+        self._run_cv_tool(labeler, tool_name)
+        backend_name = "RF-DETR Seg" if labeler.proposal_backend == "rfdetr_seg" else "SAM3"
+        self.log(f"{backend_name} auto-label session: {labeler.stats['approved']} approved, "
                  f"{labeler.stats['rejected']} rejected, "
                  f"{labeler.stats['edited']} manually edited")
         self._refresh_dataset_stats()
@@ -514,6 +720,16 @@ class FabellaApp:
 
         self.size_cb.config(values=sizes)
         self.size_var.set(sizes[0])
+        self._on_size_change()
+
+    def _on_size_change(self, _event=None):
+        arch = self.arch_var.get()
+        if arch == CLASSIFIER_ARCH:
+            backbone = self.size_var.get()
+            try:
+                self.imgsz_var.set(str(default_imgsz_for_backbone(backbone)))
+            except Exception:
+                self.imgsz_var.set("384")
 
     def _get_arch_info(self):
         # Returns (arch, version, size, epochs, imgsz, batch) from current UI state.
@@ -529,6 +745,8 @@ class FabellaApp:
     def _get_yolo_task(self):
         # Maps current architecture to task key used by YoloPreparer.
         arch = self.arch_var.get()
+        if arch == CLASSIFIER_ARCH:
+            return "classify"
         if arch == "YOLO OBB":
             return "obb"
         if arch == "RT-DETR":
@@ -539,16 +757,24 @@ class FabellaApp:
         # Opens the augmentation modal, then shows a progress window while preparing.
         arch = self.arch_var.get()
         task = self._get_yolo_task()
+        if task == "classify":
+            messagebox.showinfo(
+                "Classifier Training",
+                "Torchvision Classifier trains directly from data/sorted/pos and "
+                "data/sorted/neg, so the YOLO/COCO prepare step is not needed.",
+                parent=self.root,
+            )
+            return
 
         def on_generate(config):
             prog = PrepareProgressWindow(self.root, title=f"Preparing Dataset — All Formats")
 
             def step_cb(pct, label):
-                self.root.after(0, prog.update_step, pct, label)
+                self._enqueue_ui(lambda pct=pct, label=label: prog.update_step(pct, label))
 
             def log_cb(msg):
-                self.root.after(0, self.update_log_gui, msg)
-                self.root.after(0, prog.append_log, msg)
+                self._enqueue_ui(lambda msg=msg: self.update_log_gui(msg))
+                self._enqueue_ui(lambda msg=msg: prog.append_log(msg))
 
             def run():
                 self.set_status(f"Preparing dataset (YOLO + COCO + Detection)...")
@@ -561,11 +787,11 @@ class FabellaApp:
                     )
                     self.set_status("Ready")
                     # Refresh stats panel
-                    self.root.after(200, self._refresh_dataset_stats)
+                    self._enqueue_ui(self._refresh_dataset_stats)
                 except Exception as e:
-                    self.root.after(0, self.log, f"Error: {e}")
+                    self.log(f"Error: {e}")
                     self.set_status("Error occurred")
-                    self.root.after(0, messagebox.showerror, "Error", str(e))
+                    self._enqueue_ui(lambda e=e: messagebox.showerror("Error", str(e)))
 
             t = threading.Thread(target=run, daemon=True)
             t.start()
@@ -585,9 +811,9 @@ class FabellaApp:
             trainer.train(progress_callback=self.log)
             path = getattr(trainer, 'results_plot_path', None)
             if path and os.path.exists(path):
-                self.root.after(0, lambda: self._show_results_plot(path))
+                self._enqueue_ui(lambda path=path: self._show_results_plot(path))
             # Refresh model selector now that a new run is registered
-            self.root.after(200, self._refresh_model_list)
+            self._enqueue_ui(self._refresh_model_list)
 
         self.run_in_thread(do_train, f"Training {arch} {size}...")
 

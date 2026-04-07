@@ -6,6 +6,14 @@ from tkinter import ttk, messagebox
 from PIL import Image, ImageTk
 import numpy as np
 import cv2
+from trainer import ModelRegistry
+from classifier_utils import (
+    CLASSIFIER_ARCH,
+    DEFAULT_AUTO_POSITIVE_THRESHOLD,
+    DEFAULT_REVIEW_THRESHOLD,
+    load_classifier_checkpoint,
+    predict_fabella_probability,
+)
 
 # Colors
 BG_COLOR = "#1E1E1E"
@@ -14,6 +22,150 @@ ACCENT_KEEP = "#4CAF50"  # Green
 ACCENT_DISCARD = "#FF5252"  # Red
 BUTTON_BG = "#333333"
 BUTTON_ACTIVE = "#444444"
+ACCENT_MODEL = "#1976D2"
+
+
+class ClassifierTriageDialog(tk.Toplevel):
+    def __init__(self, parent, models):
+        super().__init__(parent)
+        self.title("Classifier-Assisted Triage")
+        self.configure(bg=BG_COLOR)
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.result = None
+        self.models = models
+
+        self.model_var = tk.StringVar()
+        self.auto_var = tk.StringVar(value=f"{DEFAULT_AUTO_POSITIVE_THRESHOLD:.2f}")
+        self.review_var = tk.StringVar(value=f"{DEFAULT_REVIEW_THRESHOLD:.2f}")
+
+        container = tk.Frame(self, bg=BG_COLOR, padx=18, pady=16)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(
+            container,
+            text="Use a trained classifier to auto-promote only the safest fabella candidates.",
+            font=("Segoe UI", 10),
+            bg=BG_COLOR,
+            fg=FG_COLOR,
+            justify=tk.LEFT,
+            wraplength=420,
+        ).pack(anchor=tk.W, pady=(0, 12))
+
+        tk.Label(container, text="Model:", bg=BG_COLOR, fg=FG_COLOR).pack(anchor=tk.W)
+        self.model_cb = ttk.Combobox(
+            container,
+            textvariable=self.model_var,
+            state="readonly",
+            width=56,
+        )
+        self.model_labels = []
+        for entry in models:
+            self.model_labels.append(
+                f"{entry.get('arch', CLASSIFIER_ARCH)} [{entry.get('size', '?')}] - "
+                f"{entry.get('date', 'unknown')}"
+            )
+        self.model_cb.config(values=self.model_labels)
+        self.model_cb.current(0)
+        self.model_cb.pack(fill=tk.X, pady=(4, 12))
+
+        thresh = tk.Frame(container, bg=BG_COLOR)
+        thresh.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(thresh, text="Auto-positive >=", bg=BG_COLOR, fg=FG_COLOR).grid(
+            row=0, column=0, sticky=tk.W, padx=(0, 6), pady=4
+        )
+        tk.Entry(
+            thresh,
+            textvariable=self.auto_var,
+            width=8,
+            bg="#2D2D2D",
+            fg=FG_COLOR,
+            insertbackground=FG_COLOR,
+        ).grid(row=0, column=1, sticky=tk.W, pady=4)
+
+        tk.Label(thresh, text="Review >=", bg=BG_COLOR, fg=FG_COLOR).grid(
+            row=1, column=0, sticky=tk.W, padx=(0, 6), pady=4
+        )
+        tk.Entry(
+            thresh,
+            textvariable=self.review_var,
+            width=8,
+            bg="#2D2D2D",
+            fg=FG_COLOR,
+            insertbackground=FG_COLOR,
+        ).grid(row=1, column=1, sticky=tk.W, pady=4)
+
+        tk.Label(
+            container,
+            text=(
+                "Images above the auto-positive threshold are moved into sorted/pos. "
+                "Everything else stays in the current folder; the review-band images "
+                "are simply shown first in the queue."
+            ),
+            font=("Segoe UI", 9),
+            bg=BG_COLOR,
+            fg="#999999",
+            justify=tk.LEFT,
+            wraplength=420,
+        ).pack(anchor=tk.W, pady=(0, 12))
+
+        btns = tk.Frame(container, bg=BG_COLOR)
+        btns.pack(fill=tk.X)
+        tk.Button(
+            btns,
+            text="Cancel",
+            command=self.destroy,
+            bg=BUTTON_BG,
+            fg=FG_COLOR,
+            activebackground=BUTTON_ACTIVE,
+            relief=tk.FLAT,
+            padx=16,
+        ).pack(side=tk.RIGHT)
+        tk.Button(
+            btns,
+            text="Run Triage",
+            command=self._on_confirm,
+            bg=ACCENT_MODEL,
+            fg="white",
+            activebackground=ACCENT_MODEL,
+            relief=tk.FLAT,
+            padx=16,
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+
+    def _on_confirm(self):
+        try:
+            auto = float(self.auto_var.get())
+            review = float(self.review_var.get())
+        except ValueError:
+            messagebox.showerror("Invalid Threshold", "Thresholds must be numeric values.", parent=self)
+            return
+
+        if not (0.0 <= review <= 1.0 and 0.0 <= auto <= 1.0):
+            messagebox.showerror(
+                "Invalid Threshold",
+                "Thresholds must be between 0.0 and 1.0.",
+                parent=self,
+            )
+            return
+        if review > auto:
+            messagebox.showerror(
+                "Invalid Threshold",
+                "Review threshold must be less than or equal to the auto-positive threshold.",
+                parent=self,
+            )
+            return
+
+        idx = self.model_cb.current()
+        if idx < 0:
+            idx = 0
+        self.result = {
+            "model_entry": self.models[idx],
+            "auto_threshold": auto,
+            "review_threshold": review,
+        }
+        self.destroy()
 
 class FabellaCleaner(tk.Toplevel):
     # A Tkinter Toplevel window for sorting images into keep/discard categories.
@@ -51,8 +203,9 @@ class FabellaCleaner(tk.Toplevel):
             self.discard_dir = discard_dir_override
         else:
             self.discard_dir = os.path.join(self.discard_base, self.category)
+        self.auto_positive_dir = os.path.join(self.output_base, "pos")
 
-        for d in [self.output_dir, self.discard_dir]:
+        for d in [self.output_dir, self.discard_dir, self.auto_positive_dir]:
             if not os.path.exists(d):
                 os.makedirs(d)
 
@@ -68,6 +221,8 @@ class FabellaCleaner(tk.Toplevel):
         
         self.total_images = len(self.image_files)
         self.processed_count = 0
+        self.model_scores = {}
+        self.triage_state = None
 
         # Zoom and Pan variables
         self.current_image = None
@@ -146,6 +301,15 @@ class FabellaCleaner(tk.Toplevel):
         )
         self.zoom_info_label.pack(pady=(0, 5))
 
+        self.model_score_label = tk.Label(
+            self,
+            text="Model triage not run.",
+            font=("Segoe UI", 9),
+            bg=BG_COLOR,
+            fg="#888888"
+        )
+        self.model_score_label.pack(pady=(0, 5))
+
         # Controls / Instructions
         self.controls_frame = tk.Frame(self, bg=BG_COLOR)
         self.controls_frame.pack(fill=tk.X, padx=50, pady=(10, 30))
@@ -166,6 +330,14 @@ class FabellaCleaner(tk.Toplevel):
             self.reset_zoom
         )
         self.btn_reset_zoom.pack(side=tk.LEFT, padx=10)
+
+        self.btn_model_triage = self.create_button(
+            self.controls_frame,
+            "MODEL TRIAGE",
+            ACCENT_MODEL,
+            self.run_model_triage
+        )
+        self.btn_model_triage.pack(side=tk.LEFT, padx=10)
 
         self.btn_keep = self.create_button(
             self.controls_frame, 
@@ -221,8 +393,16 @@ class FabellaCleaner(tk.Toplevel):
         if self.image_files:
             current_file = self.image_files[0]
             self.filename_label.config(text=current_file)
+            self._update_model_score_label(current_file)
         else:
             self.filename_label.config(text="No more images")
+            if self.triage_state:
+                self.model_score_label.config(
+                    text=f"Triage complete ({self.triage_state['run_name']}).",
+                    fg="#888888",
+                )
+            else:
+                self.model_score_label.config(text="Model triage not run.", fg="#888888")
 
     def show_image(self):
         # Displays the current image on the canvas.
@@ -360,6 +540,7 @@ class FabellaCleaner(tk.Toplevel):
             self.history.append((filename, self.input_dir, destination))
             self.image_files.pop(0)
             self.processed_count += 1
+            self.model_scores.pop(filename, None)
             self.show_image()
         except Exception as e:
             messagebox.showerror("Error", f"Failed to move file: {e}", parent=self)
@@ -392,3 +573,152 @@ class FabellaCleaner(tk.Toplevel):
                 messagebox.showerror("Error", f"Failed to undo: {e}", parent=self)
         else:
             messagebox.showwarning("Warning", f"File {filename} not found in {src}", parent=self)
+
+    def _update_model_score_label(self, filename):
+        score = self.model_scores.get(filename)
+        if score is None:
+            if self.triage_state:
+                self.model_score_label.config(
+                    text=(
+                        f"Triage active ({self.triage_state['run_name']}) - "
+                        "this file was not scored."
+                    ),
+                    fg="#888888",
+                )
+            else:
+                self.model_score_label.config(text="Model triage not run.", fg="#888888")
+            return
+
+        band = "MANUAL"
+        color = "#888888"
+        auto_threshold = self.triage_state["auto_threshold"] if self.triage_state else 1.0
+        review_threshold = self.triage_state["review_threshold"] if self.triage_state else 1.0
+        if score >= auto_threshold:
+            band = "AUTO-POSITIVE"
+            color = ACCENT_KEEP
+        elif score >= review_threshold:
+            band = "REVIEW BAND"
+            color = "#FFB74D"
+
+        self.model_score_label.config(
+            text=f"Model fabella score: {score * 100:.1f}% - {band}",
+            fg=color,
+        )
+
+    def run_model_triage(self):
+        if not self.image_files:
+            messagebox.showinfo("No Images", "There are no remaining images to triage.", parent=self)
+            return
+
+        classifier_models = [
+            entry for entry in ModelRegistry.all_models()
+            if entry.get("arch") == CLASSIFIER_ARCH and os.path.exists(entry.get("weights_path", ""))
+        ]
+        if not classifier_models:
+            messagebox.showwarning(
+                "No Classifier Models",
+                "Train a Torchvision Classifier first, then come back to use model triage.",
+                parent=self,
+            )
+            return
+
+        dialog = ClassifierTriageDialog(self, classifier_models)
+        self.wait_window(dialog)
+        if not dialog.result:
+            return
+
+        entry = dialog.result["model_entry"]
+        auto_threshold = dialog.result["auto_threshold"]
+        review_threshold = dialog.result["review_threshold"]
+        weights_path = entry.get("weights_path", "")
+        if not os.path.exists(weights_path):
+            messagebox.showerror(
+                "Missing Weights",
+                f"Model weights were not found at:\n{weights_path}",
+                parent=self,
+            )
+            return
+
+        try:
+            model, checkpoint, device, transform = load_classifier_checkpoint(weights_path)
+        except Exception as exc:
+            messagebox.showerror("Load Error", f"Could not load classifier:\n{exc}", parent=self)
+            return
+
+        self.config(cursor="watch")
+        self.count_label.config(text="Running model triage...")
+        self.update_idletasks()
+
+        moved_auto = 0
+        review_files = []
+        manual_files = []
+        scored_files = list(self.image_files)
+
+        try:
+            for idx, filename in enumerate(scored_files, start=1):
+                src = os.path.join(self.input_dir, filename)
+                if not os.path.exists(src):
+                    continue
+
+                try:
+                    prob = predict_fabella_probability(model, transform, src, device)
+                except Exception as exc:
+                    print(f"Triage error on {filename}: {exc}")
+                    prob = 0.0
+
+                self.model_scores[filename] = prob
+                if prob >= auto_threshold:
+                    dst = os.path.join(self.auto_positive_dir, filename)
+                    shutil.move(src, dst)
+                    self.history.append((filename, self.input_dir, self.auto_positive_dir))
+                    moved_auto += 1
+                    self.processed_count += 1
+                elif prob >= review_threshold:
+                    review_files.append(filename)
+                else:
+                    manual_files.append(filename)
+
+                if idx % 10 == 0 or idx == len(scored_files):
+                    self.count_label.config(
+                        text=f"Model triage {idx}/{len(scored_files)} - auto+ {moved_auto}"
+                    )
+                    self.update_idletasks()
+        finally:
+            self.config(cursor="")
+
+        self.triage_state = {
+            "run_name": entry.get("run_name", "classifier"),
+            "auto_threshold": auto_threshold,
+            "review_threshold": review_threshold,
+            "checkpoint_thresholds": {
+                "auto": checkpoint.get("auto_positive_threshold"),
+                "review": checkpoint.get("review_threshold"),
+            },
+        }
+
+        self.image_files = review_files + manual_files
+        self.total_images = self.processed_count + len(self.image_files)
+
+        if self.image_files:
+            self.show_image()
+        else:
+            self.update_status()
+            self.canvas.delete("all")
+            self.filename_label.config(text="No more images")
+            self.model_score_label.config(
+                text=f"Triage complete ({self.triage_state['run_name']}).",
+                fg="#888888",
+            )
+
+        messagebox.showinfo(
+            "Model Triage Complete",
+            (
+                f"Auto-moved to sorted/pos: {moved_auto}\n"
+                f"Review-band queued first: {len(review_files)}\n"
+                f"Remaining manual after review band: {len(manual_files)}"
+            ),
+            parent=self,
+        )
+
+        if not self.image_files:
+            self.destroy()

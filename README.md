@@ -103,7 +103,8 @@ Select architecture, size, epochs, batch size, and image size, then click **Trai
 | YOLO Seg | ultralytics | YOLO | n, s, m, l, x |
 | YOLO OBB | ultralytics | YOLO | n, s, m, l, x |
 | RT-DETR | ultralytics | YOLO | l, x |
-| RF-DETR | rfdetr | COCO | nano, small, medium, base, large |
+| RF-DETR | rfdetr | COCO | n, s, m, l |
+| RF-DETR Seg | rfdetr | COCO | n, s, m, l, xl, 2xl |
 
 After training completes, a results chart (loss + class error over epochs) is displayed automatically.
 

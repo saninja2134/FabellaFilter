@@ -19,7 +19,7 @@ def _to_uint8(img):
         img = (img / 256).astype(np.uint8)
     elif img.dtype != np.uint8:
         img = img.astype(np.uint8)
-    return cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX)
+    return cv2.normalize(img, np.empty(img.shape, dtype=np.uint8), 0, 255, cv2.NORM_MINMAX)
 
 
 class YoloPreparer:
@@ -224,7 +224,7 @@ class YoloPreparer:
             if img is None:
                 return
             if config:
-                img = augmentation.apply_preprocessing(img, config)
+                img, labels = augmentation.apply_preprocessing_with_labels(img, labels, config)
             img = _to_uint8(img)
             img_dst = os.path.join(self.base_output, split, 'images', fname)
             cv2.imwrite(img_dst, img, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
