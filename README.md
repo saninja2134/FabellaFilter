@@ -142,6 +142,11 @@ Entry point. Tkinter window with **Dataset Tools** and **Model Training** tabs. 
 ### `labeler_seg.py`
 `SegLabeler` — polygon segmentation annotation tool. Click to place vertices, right-click to close. Saves labels in YOLO segment format. Automatically mirrors each image into sibling `pos_labeled/` / `pos_unlabeled/` directories as labels are added or removed.
 
+**In-canvas display menu** (press `M` or click the MENU badge, top-right):
+- **Colour swatches** — 8 preset fill colours (Green, Yellow, Cyan, Magenta, Red, Orange, Blue, White); visual only, no effect on saved label files
+- **Opacity cycle** — cycles fill transparency from 0 % (outline only) to 50 % in 10 % steps; also bound to `T`
+- **Direction markers** — toggled via the menu or `V`; places numbered vertex markers at evenly-spaced intervals (e.g. vertices 1, 6, 11, 16, 21 for a 25-point polygon) and shows a CW / CCW winding label above the shape
+
 ### `labeler_sam.py`
 `SAM3AutoLabeler` — model-assisted auto-labeling tool. Supports SAM3 segment-everything or a trained RF-DETR Seg model as the proposal backend. References are used to rank candidates; the review loop is identical across backends. Images are mirrored into sibling `pos_labeled/` / `pos_unlabeled/` directories as labels are saved.
 
@@ -176,6 +181,17 @@ Shared utilities for the Torchvision Classifier pipeline: backbone registry (Eff
 ## Version Log
 
 ### `testing` branch
+
+#### v0.5.1 — Seg Labeler Display Menu
+
+**Seg labeler (`labeler_seg.py`)**
+- In-canvas floating menu panel (toggle `M` or click MENU badge, top-right) with three controls:
+  - **Colour swatches** — 8 preset polygon fill colours; purely visual, no effect on saved labels
+  - **Opacity cycle** — fill transparency 0 %→10 %→…→50 %; also bound to `T`
+  - **Direction markers** — toggle with menu button or `V`; marks up to 5 evenly-spaced polygon vertices with their actual 1-based index (e.g. 1 / 6 / 11 / 16 / 21 for a 25-point polygon) and renders a CW / CCW winding label above the shape
+- Polygon fill/outline colour now derived from `self.poly_color`; outline auto-darkened at 65 %
+- Fill overlay skipped entirely when opacity is 0 %
+- Hint text updated to include `M: Menu | T: Opacity | V: Direction`
 
 #### v0.5.0 — Torchvision Classifier, Shape Analysis, RF-DETR Auto-Label Backend & UI Fixes
 

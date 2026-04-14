@@ -8,7 +8,6 @@ class SegLabeler:
     # An OpenCV-based tool for annotating images with Segmentation Polygons.
     def __init__(self, image_dir="data/sorted/pos", label_dir="data/labels/seg"):
         # Initializes the SegLabeler.
-        # 
         # Args:
         # image_dir (str): Directory containing images to label.
         # label_dir (str): Directory to save the labels.
@@ -43,6 +42,23 @@ class SegLabeler:
         self.dragging = False
         self.last_mouse = [0, 0]
 
+        # Display settings (visual only – do not affect saved label files)
+        self.PRESET_COLORS = [
+            ((0, 255, 0),     "Green"),
+            ((0, 255, 255),   "Yellow"),
+            ((255, 255, 0),   "Cyan"),
+            ((255, 0, 255),   "Magenta"),
+            ((0, 0, 255),     "Red"),
+            ((0, 128, 255),   "Orange"),
+            ((255, 0, 0),     "Blue"),
+            ((255, 255, 255), "White"),
+        ]
+        self.OPACITY_LEVELS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+        self.poly_color = (0, 255, 0)   # Active BGR fill colour (visual only)
+        self.transparency = 0.3          # Fill alpha
+        self.show_direction = False      # Direction marker visibility
+        self.show_menu = False           # Menu panel visibility
+
         self.sync_label_folders()
 
     def get_image_path(self, image_name):
@@ -74,6 +90,42 @@ class SegLabeler:
         for image_name in self.images:
             self.sync_image_bucket(image_name)
 
+    def _outline_color(self, bgr):
+        return tuple(int(c * 0.65) for c in bgr)
+
+    def _handle_menu_click(self, x, y):
+        # Badge toggle (always-visible, top-right)
+        if 1278 <= x <= 1395 and 29 <= y <= 53:
+            self.show_menu = not self.show_menu
+            return True
+        if not self.show_menu:
+            return False
+        # Panel constants – must mirror the values used in redraw()
+        mpx, mpy = 1165, 56
+        # Colour swatches
+        for i, (color, _) in enumerate(self.PRESET_COLORS):
+            cx = mpx + 40 + i * 22
+            cy = mpy + 44
+            if (x - cx) ** 2 + (y - cy) ** 2 <= 9 ** 2:
+                self.poly_color = color
+                return True
+        # Opacity button
+        if mpx <= x <= mpx + 227 and mpy + 62 <= y <= mpy + 90:
+            try:
+                idx = self.OPACITY_LEVELS.index(self.transparency)
+            except ValueError:
+                idx = 3
+            self.transparency = self.OPACITY_LEVELS[(idx + 1) % len(self.OPACITY_LEVELS)]
+            return True
+        # Direction button
+        if mpx <= x <= mpx + 227 and mpy + 98 <= y <= mpy + 126:
+            self.show_direction = not self.show_direction
+            return True
+        # Absorb any other click inside the panel so it doesn't place a polygon point
+        if mpx <= x <= mpx + 232 and mpy <= y <= mpy + 140:
+            return True
+        return False
+
     def mouse_callback(self, event, x, y, flags, param):
         # Handles mouse events for drawing, panning, and zooming.
         # Convert screen x,y to image x,y
@@ -81,6 +133,9 @@ class SegLabeler:
         img_y = (y - self.offset[1]) / (self.zoom_level if self.zoom_level > 0 else 0.001)
 
         if event == cv2.EVENT_LBUTTONDOWN:
+            if self._handle_menu_click(x, y):
+                self.redraw()
+                return
             self.current_polygon.append((img_x, img_y))
             self.redraw()
             
@@ -146,18 +201,49 @@ class SegLabeler:
                 display[y1:y2, x1:x2] = resized[iy1:iy2, ix1:ix2]
 
         # Draw Completed Polygons (with alpha blending)
-        overlay = display.copy()
+        outline_col = self._outline_color(self.poly_color)
+        if self.transparency > 0:
+            overlay = display.copy()
+            for poly in self.polygons:
+                scr_coords = [[int(px * self.zoom_level + self.offset[0]),
+                               int(py * self.zoom_level + self.offset[1])] for px, py in poly]
+                if scr_coords:
+                    cv2.fillPoly(overlay, [np.array(scr_coords, np.int32)], self.poly_color)
+            cv2.addWeighted(overlay, self.transparency, display, 1.0 - self.transparency, 0, display)
         for poly in self.polygons:
-            scr_coords = []
-            for px, py in poly:
-                scr_coords.append([int(px * self.zoom_level + self.offset[0]),
-                                   int(py * self.zoom_level + self.offset[1])])
+            scr_coords = [[int(px * self.zoom_level + self.offset[0]),
+                           int(py * self.zoom_level + self.offset[1])] for px, py in poly]
             if scr_coords:
-                pts = np.array(scr_coords, np.int32)
-                cv2.fillPoly(overlay, [pts], (0, 255, 0))
-                cv2.polylines(display, [pts], True, (0, 200, 0), 2)
-                
-        cv2.addWeighted(overlay, 0.3, display, 0.7, 0, display)
+                cv2.polylines(display, [np.array(scr_coords, np.int32)], True, outline_col, 2)
+
+        # Direction markers
+        if self.show_direction:
+            for poly in self.polygons:
+                n = len(poly)
+                if n == 0:
+                    continue
+                interval = max(1, n // 5)
+                mark_indices = sorted(set(min(k * interval, n - 1) for k in range(5)))
+                # Shoelace on image coords to determine winding
+                shoelace = sum(
+                    (poly[i][0] * poly[(i + 1) % n][1]) - (poly[(i + 1) % n][0] * poly[i][1])
+                    for i in range(n)
+                )
+                winding = "CCW" if shoelace > 0 else "CW"
+                # Place winding label above the topmost screen point
+                top_sy = min(int(p[1] * self.zoom_level + self.offset[1]) for p in poly)
+                top_sx = int(sum(p[0] for p in poly) / n * self.zoom_level + self.offset[0])
+                cv2.putText(display, winding, (top_sx - 15, top_sy - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 220, 50), 2)
+                for pt_idx in mark_indices:
+                    sx = int(poly[pt_idx][0] * self.zoom_level + self.offset[0])
+                    sy = int(poly[pt_idx][1] * self.zoom_level + self.offset[1])
+                    vertex_label = str(pt_idx + 1)
+                    text_x = sx - 4 * len(vertex_label)
+                    cv2.circle(display, (sx, sy), 8, (255, 255, 255), -1)
+                    cv2.circle(display, (sx, sy), 8, (0, 0, 0), 1)
+                    cv2.putText(display, vertex_label, (text_x, sy + 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1)
 
         # Draw Current Polygon
         if self.current_polygon:
@@ -175,7 +261,49 @@ class SegLabeler:
         # UI Overlays
         info = f"Image: {self.index + 1}/{len(self.images)} | Zoom: {self.zoom_level:.2f}x | {self.images[self.index]}"
         cv2.putText(display, info, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-        cv2.putText(display, "L-Click: Point | R-Click: Close Poly | Space: Save | C: Clear | Z: Undo | A/D: Nav", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+        cv2.putText(display, "L-Click: Point | R-Click: Close Poly | Space: Save | C: Clear | Z: Undo | A/D: Nav | M: Menu | T: Opacity | V: Direction",
+                    (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+
+        # Menu badge (always visible, top-right)
+        bx1, by1, bx2, by2 = 1278, 29, 1395, 53
+        cv2.rectangle(display, (bx1, by1), (bx2, by2), (70, 70, 70), -1)
+        cv2.rectangle(display, (bx1, by1), (bx2, by2), (150, 150, 150), 1)
+        badge_label = "MENU [open]" if self.show_menu else "MENU"
+        cv2.putText(display, badge_label, (bx1 + 6, by2 - 7),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.48, (220, 220, 220), 1)
+
+        # Menu panel
+        if self.show_menu:
+            mpx, mpy, mpw, mph = 1165, 56, 232, 140
+            panel_overlay = display.copy()
+            cv2.rectangle(panel_overlay, (mpx, mpy), (mpx + mpw, mpy + mph), (35, 35, 35), -1)
+            cv2.addWeighted(panel_overlay, 0.90, display, 0.10, 0, display)
+            cv2.rectangle(display, (mpx, mpy), (mpx + mpw, mpy + mph), (130, 130, 130), 1)
+            cv2.putText(display, "DISPLAY SETTINGS", (mpx + 8, mpy + 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200, 200, 200), 1)
+            # Colour swatches
+            cv2.putText(display, "Col:", (mpx + 5, mpy + 47), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (180, 180, 180), 1)
+            for i, (color, _) in enumerate(self.PRESET_COLORS):
+                cx = mpx + 40 + i * 22
+                cy = mpy + 44
+                cv2.circle(display, (cx, cy), 9, color, -1)
+                cv2.circle(display, (cx, cy), 9, (80, 80, 80), 1)
+                if color == self.poly_color:
+                    cv2.circle(display, (cx, cy), 11, (255, 255, 255), 2)
+            # Opacity button
+            op_y1, op_y2 = mpy + 62, mpy + 88
+            cv2.rectangle(display, (mpx + 5, op_y1), (mpx + mpw - 5, op_y2), (60, 60, 60), -1)
+            cv2.rectangle(display, (mpx + 5, op_y1), (mpx + mpw - 5, op_y2), (110, 110, 110), 1)
+            cv2.putText(display, f"Opacity: {int(self.transparency * 100)}%",
+                        (mpx + 55, op_y2 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (210, 210, 210), 1)
+            # Direction button
+            dir_y1, dir_y2 = mpy + 98, mpy + 124
+            dir_col = (45, 90, 45) if self.show_direction else (60, 60, 60)
+            cv2.rectangle(display, (mpx + 5, dir_y1), (mpx + mpw - 5, dir_y2), dir_col, -1)
+            cv2.rectangle(display, (mpx + 5, dir_y1), (mpx + mpw - 5, dir_y2), (110, 110, 110), 1)
+            dir_text = "Direction: ON" if self.show_direction else "Direction: OFF"
+            cv2.putText(display, dir_text, (mpx + 45, dir_y2 - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.46, (210, 210, 210), 1)
 
         cv2.imshow(self.window_name, display)
 
@@ -304,6 +432,19 @@ class SegLabeler:
                         self.current_polygon.pop()
                     elif self.polygons:
                         self.polygons.pop()
+                    self.redraw()
+                elif key == ord('m'): # Toggle menu panel
+                    self.show_menu = not self.show_menu
+                    self.redraw()
+                elif key == ord('t'): # Cycle opacity
+                    try:
+                        idx = self.OPACITY_LEVELS.index(self.transparency)
+                    except ValueError:
+                        idx = 3
+                    self.transparency = self.OPACITY_LEVELS[(idx + 1) % len(self.OPACITY_LEVELS)]
+                    self.redraw()
+                elif key == ord('v'): # Toggle direction markers
+                    self.show_direction = not self.show_direction
                     self.redraw()
 
         cv2.destroyAllWindows()
