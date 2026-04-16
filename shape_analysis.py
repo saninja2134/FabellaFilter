@@ -53,6 +53,30 @@ METRIC_SPECS = OrderedDict(
 )
 DEFAULT_DIMENSIONS = ["area_px2", "perimeter_px", "max_diameter_px", "aspect_ratio"]
 
+ICD_CONDITION_COLUMNS: List[str] = [
+    "autoimmune",
+    "diabetes",
+    "hypertension",
+    "joint_infection",
+    "knee_osteoarthritis",
+    "knee_osteomyelitis",
+    "obesity",
+    "nicotine_use",
+    "trauma_lower_extremity",
+]
+
+ICD_DISPLAY_NAMES: Dict[str, str] = {
+    "autoimmune": "Autoimmune",
+    "diabetes": "Diabetes",
+    "hypertension": "Hypertension",
+    "joint_infection": "Joint Infection",
+    "knee_osteoarthritis": "Knee Osteoarthritis",
+    "knee_osteomyelitis": "Knee Osteomyelitis",
+    "obesity": "Obesity",
+    "nicotine_use": "Nicotine Use",
+    "trauma_lower_extremity": "Trauma Lower Extremity",
+}
+
 KNOWN_FACTOR_TYPES = {
     "Sex": "categorical",
     "Race": "categorical",
@@ -63,6 +87,16 @@ KNOWN_FACTOR_TYPES = {
     "Mirror Applied": "categorical",
     "Age At Exam": "continuous",
     "Pain Score": "continuous",
+    # ICD-derived binary conditions
+    "Autoimmune": "categorical",
+    "Diabetes": "categorical",
+    "Hypertension": "categorical",
+    "Joint Infection": "categorical",
+    "Knee Osteoarthritis": "categorical",
+    "Knee Osteomyelitis": "categorical",
+    "Obesity": "categorical",
+    "Nicotine Use": "categorical",
+    "Trauma Lower Extremity": "categorical",
 }
 
 
@@ -437,6 +471,34 @@ def load_demographics(demographics_path: str, empis: Sequence[str]) -> Dict[str,
     return matches
 
 
+def load_icd_conditions(icd_path: str, empis: Sequence[str]) -> Dict[str, Dict[str, str]]:
+    """Return a dict mapping empi -> {display_name: 'Yes'/'No'} aggregated across all ICD rows.
+
+    A condition is 'Yes' for a patient if any row for that patient has a non-zero value.
+    """
+    results: Dict[str, Dict[str, str]] = {}
+    if not os.path.exists(icd_path):
+        return results
+    wanted = set(empi for empi in empis if empi)
+    # Pre-initialise all wanted patients to 'No' for every condition.
+    for empi in wanted:
+        results[empi] = {ICD_DISPLAY_NAMES[col]: "No" for col in ICD_CONDITION_COLUMNS}
+    with open(icd_path, "r", encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            empi = row.get("empi_anon")
+            if empi not in wanted:
+                continue
+            patient = results[empi]
+            for col in ICD_CONDITION_COLUMNS:
+                display = ICD_DISPLAY_NAMES[col]
+                if patient[display] == "Yes":
+                    continue  # already flagged
+                raw = row.get(col, "0").strip()
+                if raw and raw != "0":
+                    patient[display] = "Yes"
+    return results
+
+
 def load_pain_scores(pain_path: str, empis: Sequence[str]) -> Dict[Tuple[str, str, str], float]:
     if not os.path.exists(pain_path):
         return {}
@@ -464,11 +526,12 @@ def build_factor_map(
     metadata: Dict[str, str],
     demographics: Dict[str, str],
     pain_lookup: Dict[Tuple[str, str, str], float],
+    icd_lookup: Dict[str, Dict[str, str]],
 ) -> Dict[str, Any]:
     empi = metadata.get("empi_anon")
     study_date = metadata.get("StudyDate_anon", "")
     laterality = normalize_side(metadata.get("laterality"))
-    return {
+    factors: Dict[str, Any] = {
         "Sex": demographics.get("sex"),
         "Race": demographics.get("race"),
         "Ethnicity": demographics.get("ethnicity"),
@@ -478,6 +541,9 @@ def build_factor_map(
         "Age At Exam": safe_float(metadata.get("age_at_exam")),
         "Pain Score": pain_lookup.get((empi or "", study_date, laterality or "")),
     }
+    icd_conditions = icd_lookup.get(empi or "", {})
+    factors.update(icd_conditions)
+    return factors
 
 
 def load_raw_dataset(project_root: str, emory_root: str, log_callback: Optional[Any] = None) -> RawDataset:
@@ -489,6 +555,7 @@ def load_raw_dataset(project_root: str, emory_root: str, log_callback: Optional[
     image_metadata_path = os.path.join(emory_root, "MRKR_image_metadata.csv")
     demographics_path = os.path.join(emory_root, "MRKR_demographics.csv")
     pain_path = os.path.join(emory_root, "MRKR_pain.csv")
+    icd_path = os.path.join(emory_root, "MRKR_ICD.csv")
 
     if not os.path.isdir(seg_dir):
         raise FileNotFoundError(f"Segmentation directory not found: {seg_dir}")
@@ -507,6 +574,8 @@ def load_raw_dataset(project_root: str, emory_root: str, log_callback: Optional[
     matched_empis = [row.get("empi_anon") for row in image_metadata.values() if row.get("empi_anon")]
     demographics_lookup = load_demographics(demographics_path, matched_empis)
     pain_lookup = load_pain_scores(pain_path, matched_empis)
+    log("Shape analysis: loading ICD conditions (this may take a moment for large files)")
+    icd_lookup = load_icd_conditions(icd_path, matched_empis)
 
     records: List[RawShapeRecord] = []
     summary = {
@@ -514,6 +583,7 @@ def load_raw_dataset(project_root: str, emory_root: str, log_callback: Optional[
         "matched_image_metadata": 0,
         "matched_demographics": 0,
         "matched_pain": 0,
+        "matched_icd": 0,
         "missing_image_files": 0,
         "unmatched_image_metadata_rows": max(total_image_rows - len(image_metadata), 0),
         "critical_warnings": [],
@@ -541,13 +611,16 @@ def load_raw_dataset(project_root: str, emory_root: str, log_callback: Optional[
             warnings.append("Image file not found; using metadata dimensions")
             summary["missing_image_files"] += 1
 
-        factors = build_factor_map(metadata, demographics, pain_lookup) if metadata else {}
+        factors = build_factor_map(metadata, demographics, pain_lookup, icd_lookup) if metadata else {}
         if metadata:
             summary["matched_image_metadata"] += 1
         if demographics:
             summary["matched_demographics"] += 1
         if factors.get("Pain Score") is not None:
             summary["matched_pain"] += 1
+        empi_key = metadata.get("empi_anon", "")
+        if empi_key and empi_key in icd_lookup:
+            summary["matched_icd"] += 1
 
         records.append(
             RawShapeRecord(
