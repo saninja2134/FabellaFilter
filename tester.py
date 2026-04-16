@@ -1,9 +1,16 @@
-# Unified model tester supporting YOLO (seg/obb), RT-DETR, and RF-DETR architectures.
+# Unified model tester supporting YOLO, RF-DETR, and classifier architectures.
 import cv2
 import numpy as np
 import os
 import shutil
 from trainer import ARCHITECTURES, get_arch_info, get_rfdetr_class
+from classifier_utils import (
+    DEFAULT_AUTO_POSITIVE_THRESHOLD,
+    DEFAULT_REVIEW_THRESHOLD,
+    load_classifier_checkpoint,
+    predict_fabella_probability,
+    load_png_bgr_for_overlay,
+)
 
 
 class ModelTester:
@@ -21,7 +28,10 @@ class ModelTester:
 
         safe_arch = arch.lower().replace(" ", "_").replace("-", "_")
         self.run_name  = f"fabella_{safe_arch}_{size}_v1"
-        self.model_path = os.path.join("output/runs", self.run_name, "weights", "best.pt")
+        if self.task == "classify":
+            self.model_path = os.path.join("output", "runs", self.run_name, "best_classifier.pth")
+        else:
+            self.model_path = os.path.join("output/runs", self.run_name, "weights", "best.pt")
         self.output_dir = f"output/test_{safe_arch}_{size}"
 
     def run_test(self, progress_callback=None):
@@ -30,21 +40,13 @@ class ModelTester:
             if progress_callback: progress_callback(msg)
 
         # Try .pt then .pth for RF-DETR checkpoints
-        if not os.path.exists(self.model_path):
+        if not os.path.exists(self.model_path) and self.task != "classify":
             alt = self.model_path.replace(".pt", ".pth")
             if os.path.exists(alt):
                 self.model_path = alt
-            else:
-                log(f"Error: model not found at {self.model_path}")
-                return
-
-        # Prepare output dirs
-        det_dir   = os.path.join(self.output_dir, "detected")
-        undet_dir = os.path.join(self.output_dir, "undetected")
-        if os.path.exists(self.output_dir):
-            shutil.rmtree(self.output_dir)
-        os.makedirs(det_dir)
-        os.makedirs(undet_dir)
+        if not os.path.exists(self.model_path):
+            log(f"Error: model not found at {self.model_path}")
+            return
 
         # Gather unsorted test images
         if not os.path.exists(self.src_dir):
@@ -61,6 +63,36 @@ class ModelTester:
 
         log(f"Running {self.arch} inference on {len(unsorted)} unsorted images...")
 
+        if self.backend == "torchvision":
+            auto_dir = os.path.join(self.output_dir, "auto_positive")
+            review_dir = os.path.join(self.output_dir, "review_band")
+            remain_dir = os.path.join(self.output_dir, "remaining_manual")
+            if os.path.exists(self.output_dir):
+                shutil.rmtree(self.output_dir)
+            os.makedirs(auto_dir)
+            os.makedirs(review_dir)
+            os.makedirs(remain_dir)
+            self._test_torchvision_classifier(
+                unsorted,
+                auto_dir,
+                review_dir,
+                remain_dir,
+                log,
+            )
+            log(f"\nTest complete!")
+            log(f"Auto-positive:    {len(os.listdir(auto_dir))}")
+            log(f"Review band:      {len(os.listdir(review_dir))}")
+            log(f"Remaining manual: {len(os.listdir(remain_dir))}")
+            log(f"Results in: {self.output_dir}/")
+            return
+
+        det_dir   = os.path.join(self.output_dir, "detected")
+        undet_dir = os.path.join(self.output_dir, "undetected")
+        if os.path.exists(self.output_dir):
+            shutil.rmtree(self.output_dir)
+        os.makedirs(det_dir)
+        os.makedirs(undet_dir)
+
         if self.backend == "ultralytics":
             self._test_ultralytics(unsorted, det_dir, undet_dir, log)
         elif self.backend == "rfdetr":
@@ -70,6 +102,59 @@ class ModelTester:
         log(f"Detected:   {len(os.listdir(det_dir))}")
         log(f"Undetected: {len(os.listdir(undet_dir))}")
         log(f"Results in: {self.output_dir}/")
+
+    def _test_torchvision_classifier(self, batch, auto_dir, review_dir, remain_dir, log):
+        model, checkpoint, device, transform = load_classifier_checkpoint(self.model_path)
+        auto_threshold = float(
+            checkpoint.get("auto_positive_threshold", DEFAULT_AUTO_POSITIVE_THRESHOLD)
+        )
+        review_threshold = float(
+            checkpoint.get("review_threshold", DEFAULT_REVIEW_THRESHOLD)
+        )
+        review_threshold = min(review_threshold, auto_threshold)
+        log(
+            f"Classifier triage thresholds: auto-positive >= {auto_threshold:.2f}, "
+            f"review >= {review_threshold:.2f}"
+        )
+
+        for i, img_name in enumerate(batch):
+            img_path = os.path.join(self.src_dir, img_name)
+            img_visual = load_png_bgr_for_overlay(img_path)
+            if img_visual is None:
+                continue
+
+            try:
+                prob = predict_fabella_probability(model, transform, img_path, device)
+            except Exception as exc:
+                log(f"  Inference error on {img_name}: {exc}")
+                prob = 0.0
+
+            if prob >= auto_threshold:
+                dst_dir = auto_dir
+                label = "AUTO+"
+                color = (0, 200, 0)
+            elif prob >= review_threshold:
+                dst_dir = review_dir
+                label = "REVIEW"
+                color = (0, 180, 255)
+            else:
+                dst_dir = remain_dir
+                label = "MANUAL"
+                color = (180, 180, 180)
+
+            cv2.putText(
+                img_visual,
+                f"{label} fabella={prob * 100:.1f}%",
+                (20, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                color,
+                2,
+            )
+            cv2.imwrite(os.path.join(dst_dir, img_name), img_visual)
+
+            if (i + 1) % 50 == 0:
+                log(f"  Processed {i + 1}/{len(batch)}...")
 
     # ── BACKENDS ──────────────────────────────────────────────────
 

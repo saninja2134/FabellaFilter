@@ -80,13 +80,69 @@ def _resize_crop(img, w, h):
     return resized[y_off:y_off+h, x_off:x_off+w]
 
 
+def _transform_labels_resize(labels, src_shape, dst_shape, mode):
+    # Transform normalized polygon labels to match preprocessing resize modes.
+    if not labels:
+        return labels
+
+    ih, iw = src_shape[:2]
+    w, h = dst_shape
+
+    if mode == 'Stretch':
+        return labels
+
+    if mode == 'Fit (Black Pad)':
+        pad_val = 0
+        scale = min(w / iw, h / ih)
+        nw, nh = iw * scale, ih * scale
+        x_off = (w - nw) / 2.0
+        y_off = (h - nh) / 2.0
+
+        def transform(x, y):
+            px = x * iw * scale + x_off
+            py = y * ih * scale + y_off
+            return px / w, py / h
+
+        return _transform_labels_geometric(labels, transform, filter_oob=False)
+
+    if mode == 'Fit (White Pad)':
+        scale = min(w / iw, h / ih)
+        nw, nh = iw * scale, ih * scale
+        x_off = (w - nw) / 2.0
+        y_off = (h - nh) / 2.0
+
+        def transform(x, y):
+            px = x * iw * scale + x_off
+            py = y * ih * scale + y_off
+            return px / w, py / h
+
+        return _transform_labels_geometric(labels, transform, filter_oob=False)
+
+    if mode == 'Crop':
+        scale = max(w / iw, h / ih)
+        nw, nh = iw * scale, ih * scale
+        x_off = (nw - w) / 2.0
+        y_off = (nh - h) / 2.0
+
+        def transform(x, y):
+            px = x * iw * scale - x_off
+            py = y * ih * scale - y_off
+            return px / w, py / h
+
+        return _transform_labels_geometric(labels, transform, filter_oob=True)
+
+    return labels
+
+
 def apply_preprocessing(img, config):
     # Apply all preprocessing steps to an image.
     pre = config.get('preprocessing', {})
 
     # Resize
     resize = pre.get('resize', {})
-    w, h = resize.get('width', 1024), resize.get('height', 1024)
+    h, w = img.shape[:2]
+    w = resize.get('width', w)
+    h = resize.get('height', h)
     mode = resize.get('mode', 'Stretch')
     if mode == 'Stretch':
         img = _resize_stretch(img, w, h)
@@ -113,6 +169,21 @@ def apply_preprocessing(img, config):
             img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
     return img
+
+
+def apply_preprocessing_with_labels(img, labels, config):
+    # Apply preprocessing to both image and polygon labels.
+    pre = config.get('preprocessing', {})
+
+    resize = pre.get('resize', {})
+    h, w = img.shape[:2]
+    w = resize.get('width', w)
+    h = resize.get('height', h)
+    mode = resize.get('mode', 'Stretch')
+
+    labels = _transform_labels_resize(labels, img.shape, (w, h), mode)
+    img = apply_preprocessing(img, config)
+    return img, labels
 
 
 # ─────────────────────────────────────────────────────────────────

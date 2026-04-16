@@ -1,9 +1,22 @@
-# Unified model trainer supporting YOLO (seg/obb), RT-DETR, and RF-DETR architectures.
+# Unified model trainer supporting YOLO (seg/obb), RT-DETR, RF-DETR, and classification architectures.
 import os
 import sys
 import json
 import torch
 from datetime import datetime
+
+from classifier_utils import (
+    CLASSIFIER_ARCH,
+    DEFAULT_AUTO_POSITIVE_THRESHOLD,
+    DEFAULT_REVIEW_THRESHOLD,
+    format_backbone_label,
+    gather_sorted_samples,
+    create_classifier_model,
+    build_classifier_transforms,
+    split_classifier_samples,
+    ImagePathDataset,
+    save_classifier_checkpoint,
+)
 
 REGISTRY_PATH = os.path.join("output", "model_registry.json")
 
@@ -58,6 +71,10 @@ class ModelRegistry:
                             weights = candidate
                             break
                 if not os.path.exists(weights):
+                    candidate = os.path.join(run_path, "best_classifier.pth")
+                    if os.path.exists(candidate):
+                        weights = candidate
+                if not os.path.exists(weights):
                     continue
                 arch, size = ModelRegistry._infer_from_name(name)
                 records.append({
@@ -82,6 +99,10 @@ class ModelRegistry:
             stripped = stripped[len("fabella_"):]
         if "_v" in stripped:
             stripped = stripped[:stripped.rfind("_v")]
+        if stripped.startswith("torchvision_classifier_"):
+            arch_key = "torchvision_classifier"
+            size = stripped[len("torchvision_classifier_"):]
+            return CLASSIFIER_ARCH, size
         parts = stripped.rsplit("_", 1)
         size     = parts[-1] if len(parts) > 1 else "?"
         arch_key = parts[0]  if len(parts) > 1 else stripped
@@ -91,6 +112,7 @@ class ModelRegistry:
             "rt_detr":     "RT-DETR",
             "rf_detr":     "RF-DETR",
             "rf_detr_seg": "RF-DETR Seg",
+            "torchvision_classifier": CLASSIFIER_ARCH,
         }
         return arch_map.get(arch_key, arch_key), size
 
@@ -136,6 +158,18 @@ ARCHITECTURES = {
         "sizes":    ["n", "s", "m", "l", "xl", "2xl"],
         "versions": [""],
     },
+    CLASSIFIER_ARCH: {
+        "backend":  "torchvision",
+        "task":     "classify",
+        "format":   "sorted_dirs",
+        "sizes":    [
+            "efficientnet_v2_s",
+            "resnet50",
+            "resnet18",
+            "mobilenet_v3_small",
+        ],
+        "versions": [""],
+    },
 }
 
 
@@ -157,9 +191,34 @@ RFDETR_SEG_MAP = {
     "xl": "RFDETRSegXLarge", "2xl": "RFDETRSeg2XLarge",
 }
 
+RFDETR_SEG_TRAIN_KWARGS = {
+    "lr": 1e-4,
+    "lr_scheduler": "step",
+    "warmup_epochs": 3.0,
+    "use_ema": True,
+    "ema_decay": 0.9997,
+    "ema_tau": 100,
+    "early_stopping": True,
+    "early_stopping_patience": 20,
+    "early_stopping_min_delta": 0.001,
+    "early_stopping_use_ema": True,
+    "checkpoint_interval": 10,
+    "tensorboard": True,
+    "wandb": False,
+    "run_test": True,
+    "num_workers": 2,
+    "seed": 42,
+}
+
+RFDETR_SEG_LOSS_KWARGS = {
+    "mask_ce_loss_coef": 5.0,
+    "mask_dice_loss_coef": 5.0,
+    "cls_loss_coef": 5.0,
+}
+
 
 def get_rfdetr_class(task, size):
-    """Return (class_name, class_object) for an RF-DETR variant, or raise."""
+    # Return (class_name, class_object) for an RF-DETR variant, or raise.
     cls_map = RFDETR_SEG_MAP if task == "segment" else RFDETR_DET_MAP
     cls_name = cls_map.get(size)
     if cls_name is None:
@@ -184,7 +243,9 @@ class ModelTrainer:
         # Args:
         # arch    : one of ARCHITECTURES keys
         # version : model version string (ignored for RT-DETR/RF-DETR)
-        # size    : size token — 'n','s','m','l','x' for YOLO; 'base'/'large' for RF-DETR
+        # size    : size token — 'n','s','m','l','x' for YOLO;
+        #           'n','s','m','l' for RF-DETR detect;
+        #           'n','s','m','l','xl','2xl' for RF-DETR Seg
         # epochs  : training epochs
         # imgsz   : input image size (square)
         # batch   : batch size
@@ -200,7 +261,14 @@ class ModelTrainer:
         self.batch   = batch
 
         # Derive paths
-        task_key = "obb" if self.task == "obb" else ("seg" if self.task == "segment" else "det")
+        if self.task == "obb":
+            task_key = "obb"
+        elif self.task == "segment":
+            task_key = "seg"
+        elif self.task == "classify":
+            task_key = "cls"
+        else:
+            task_key = "det"
         safe_arch = arch.lower().replace(" ", "_").replace("-", "_")
         base_name = f"fabella_{safe_arch}_{size}"
 
@@ -238,6 +306,8 @@ class ModelTrainer:
             self._train_ultralytics(log)
         elif self.backend == "rfdetr":
             self._train_rfdetr(log)
+        elif self.backend == "torchvision":
+            self._train_torchvision_classifier(log)
         else:
             log(f"Unknown backend: {self.backend}")
 
@@ -323,13 +393,17 @@ class ModelTrainer:
         log(f"\nTraining complete! Best model: {best}")
 
     def _train_rfdetr(self, log):
-        # Patch supervision < 0.26 missing xyxy_to_xywh (rfdetr still needs it)
+        # Patch supervision < 0.26 missing xyxy_to_xywh (rfdetr still needs it).
         try:
             import supervision as _sv
             if not hasattr(_sv, 'xyxy_to_xywh'):
-                import numpy as _np
-                _sv.xyxy_to_xywh = lambda xyxy: _np.column_stack([
-                    xyxy[..., :2], xyxy[..., 2:] - xyxy[..., :2]])
+                def _xyxy_to_xywh(xyxy):
+                    xywh = xyxy.copy()
+                    xywh[..., 2] = xyxy[..., 2] - xyxy[..., 0]
+                    xywh[..., 3] = xyxy[..., 3] - xyxy[..., 1]
+                    return xywh
+
+                _sv.xyxy_to_xywh = _xyxy_to_xywh
         except ImportError:
             pass
 
@@ -364,23 +438,28 @@ class ModelTrainer:
 
         log(f"Loading RF-DETR {cls_name}...")
 
-        # Snap resolution to nearest multiple of 32 (patch_size × num_windows)
-        divisor = 32
-        resolution = max(divisor, round(self.imgsz / divisor) * divisor)
-
-        # Use default constructor (loads correct pretrained weights automatically)
+        # Use the model's native pretrained settings instead of rounding the UI size.
+        # This keeps RF-DETR Seg Small on its default 384x384 resolution.
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         model = model_cls()
+        resolution = getattr(model.model_config, "resolution", self.imgsz)
+        pretrain_weights = getattr(model.model_config, "pretrain_weights", None)
+
+        if pretrain_weights:
+            log(f"  Pretrained weights: {pretrain_weights}")
+        log(f"  Native resolution: {resolution} (requested imgsz={self.imgsz})")
 
         # Effective batch = batch_size × grad_accum_steps
         grad_accum = max(1, 16 // self.batch)
-        warmup = min(3, max(1, self.epochs // 10))
+        warmup = RFDETR_SEG_TRAIN_KWARGS["warmup_epochs"]
 
-        log(f"  Resolution: {resolution}  |  Effective batch: {self.batch}×{grad_accum}={self.batch * grad_accum}")
+        log(f"  Effective batch: {self.batch}×{grad_accum}={self.batch * grad_accum}")
         log(f"  Warmup: {warmup} epochs  |  Early stopping patience: 20")
+        log(f"  COCO dataset: {self.coco_dir}")
         log("  TensorBoard logging enabled — run: tensorboard --logdir output/runs")
 
         try:
-            model.train(
+            train_kwargs = dict(
                 # ── Dataset ──
                 dataset_dir=self.coco_dir,
 
@@ -388,7 +467,6 @@ class ModelTrainer:
                 epochs=self.epochs,
                 batch_size=self.batch,
                 grad_accum_steps=grad_accum,
-                lr=1e-4,
                 warmup_epochs=warmup,
 
                 # ── EMA ──
@@ -411,20 +489,280 @@ class ModelTrainer:
 
                 # ── Logging ──
                 tensorboard=True,
+                wandb=False,
+                device=device,
+                num_workers=2,
+                seed=42,
 
                 # ── Run test set after training ──
                 run_test=True,
             )
+
+            train_kwargs.update(RFDETR_SEG_TRAIN_KWARGS)
+            if self.task == "segment":
+                train_kwargs.update(RFDETR_SEG_LOSS_KWARGS)
+
+            model.train(**train_kwargs)
             log(f"\nRF-DETR training complete! Output: {self.output_dir}/{self.run_name}")
             ModelRegistry.register(self._make_registry_entry())
         except Exception as e:
             log(f"Training error: {e}")
+
+    def _train_torchvision_classifier(self, log):
+        import copy
+        import math
+
+        import matplotlib.pyplot as plt
+        from torch.utils.data import DataLoader
+
+        samples = gather_sorted_samples()
+        pos_count = sum(1 for _, label in samples if label == 1)
+        neg_count = sum(1 for _, label in samples if label == 0)
+        if pos_count < 2 or neg_count < 2:
+            log(
+                "Error: classifier training needs at least 2 positive and 2 negative "
+                "sorted PNGs in data/sorted/pos and data/sorted/neg."
+            )
+            return
+
+        train_samples, val_samples = split_classifier_samples(samples, val_fraction=0.2, seed=42)
+        log(
+            f"Using sorted folders directly for classification: "
+            f"{len(train_samples)} train / {len(val_samples)} val "
+            f"({pos_count} pos, {neg_count} neg total)."
+        )
+
+        train_transform = build_classifier_transforms(self.imgsz, train=True)
+        val_transform = build_classifier_transforms(self.imgsz, train=False)
+        train_ds = ImagePathDataset(train_samples, transform=train_transform)
+        val_ds = ImagePathDataset(val_samples, transform=val_transform)
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        pin_memory = device.type == "cuda"
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=max(1, self.batch),
+            shuffle=True,
+            num_workers=0,
+            pin_memory=pin_memory,
+        )
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=max(1, self.batch),
+            shuffle=False,
+            num_workers=0,
+            pin_memory=pin_memory,
+        )
+
+        model, pretrained_loaded, warning = create_classifier_model(self.size, pretrained=True)
+        if warning:
+            log(warning)
+        log(
+            f"Loading {format_backbone_label(self.size)} "
+            f"({'pretrained' if pretrained_loaded else 'random init'})..."
+        )
+        model.to(device)
+
+        train_pos = sum(1 for _, label in train_samples if label == 1)
+        train_neg = sum(1 for _, label in train_samples if label == 0)
+        total_train = max(1, train_pos + train_neg)
+        class_weights = torch.tensor(
+            [
+                total_train / max(1, 2 * train_neg),
+                total_train / max(1, 2 * train_pos),
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+
+        criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-4)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="max", factor=0.5, patience=3
+        )
+
+        best_f1 = -1.0
+        best_loss = math.inf
+        best_state = None
+        best_metrics = {}
+        patience = 10
+        stale_epochs = 0
+        history = {
+            "epoch": [],
+            "train_loss": [],
+            "val_loss": [],
+            "train_acc": [],
+            "val_acc": [],
+            "val_precision": [],
+            "val_recall": [],
+            "val_f1": [],
+        }
+
+        log(
+            f"Starting {self.arch} training with {format_backbone_label(self.size)} "
+            f"(epochs={self.epochs}, imgsz={self.imgsz}, batch={self.batch})..."
+        )
+
+        for epoch in range(1, self.epochs + 1):
+            model.train()
+            train_loss_sum = 0.0
+            train_correct = 0
+            train_total = 0
+
+            for images, labels, _paths in train_loader:
+                images = images.to(device, non_blocking=pin_memory)
+                labels = labels.to(device, non_blocking=pin_memory)
+
+                optimizer.zero_grad(set_to_none=True)
+                logits = model(images)
+                loss = criterion(logits, labels)
+                loss.backward()
+                optimizer.step()
+
+                batch_size = labels.size(0)
+                train_loss_sum += float(loss.item()) * batch_size
+                train_correct += int((logits.argmax(dim=1) == labels).sum().item())
+                train_total += batch_size
+
+            model.eval()
+            val_loss_sum = 0.0
+            val_correct = 0
+            val_total = 0
+            tp = fp = fn = 0
+
+            with torch.no_grad():
+                for images, labels, _paths in val_loader:
+                    images = images.to(device, non_blocking=pin_memory)
+                    labels = labels.to(device, non_blocking=pin_memory)
+                    logits = model(images)
+                    loss = criterion(logits, labels)
+                    preds = logits.argmax(dim=1)
+
+                    batch_size = labels.size(0)
+                    val_loss_sum += float(loss.item()) * batch_size
+                    val_correct += int((preds == labels).sum().item())
+                    val_total += batch_size
+
+                    tp += int(((preds == 1) & (labels == 1)).sum().item())
+                    fp += int(((preds == 1) & (labels == 0)).sum().item())
+                    fn += int(((preds == 0) & (labels == 1)).sum().item())
+
+            train_loss = train_loss_sum / max(1, train_total)
+            val_loss = val_loss_sum / max(1, val_total)
+            train_acc = train_correct / max(1, train_total)
+            val_acc = val_correct / max(1, val_total)
+            val_precision = tp / max(1, tp + fp)
+            val_recall = tp / max(1, tp + fn)
+            val_f1 = 0.0
+            if val_precision + val_recall > 0:
+                val_f1 = 2 * val_precision * val_recall / (val_precision + val_recall)
+
+            scheduler.step(val_f1)
+
+            history["epoch"].append(epoch)
+            history["train_loss"].append(train_loss)
+            history["val_loss"].append(val_loss)
+            history["train_acc"].append(train_acc)
+            history["val_acc"].append(val_acc)
+            history["val_precision"].append(val_precision)
+            history["val_recall"].append(val_recall)
+            history["val_f1"].append(val_f1)
+
+            log(
+                f"Epoch {epoch:03d}/{self.epochs}  "
+                f"train_loss={train_loss:.4f}  val_loss={val_loss:.4f}  "
+                f"val_acc={val_acc:.3f}  precision={val_precision:.3f}  "
+                f"recall={val_recall:.3f}  f1={val_f1:.3f}"
+            )
+
+            improved = (val_f1 > best_f1 + 1e-6) or (
+                abs(val_f1 - best_f1) <= 1e-6 and val_loss < best_loss
+            )
+            if improved:
+                best_f1 = val_f1
+                best_loss = val_loss
+                stale_epochs = 0
+                best_state = copy.deepcopy(model.state_dict())
+                best_metrics = {
+                    "val_loss": val_loss,
+                    "val_acc": val_acc,
+                    "val_precision": val_precision,
+                    "val_recall": val_recall,
+                    "val_f1": val_f1,
+                    "train_samples": len(train_samples),
+                    "val_samples": len(val_samples),
+                    "pretrained_loaded": pretrained_loaded,
+                }
+            else:
+                stale_epochs += 1
+                if stale_epochs >= patience:
+                    log(f"Early stopping after {epoch} epochs with no F1 improvement.")
+                    break
+
+        if best_state is None:
+            log("Training aborted before a usable checkpoint was created.")
+            return
+
+        model.load_state_dict(best_state)
+        os.makedirs(self.run_dir, exist_ok=True)
+        best_path = os.path.join(self.run_dir, "best_classifier.pth")
+        save_classifier_checkpoint(
+            best_path,
+            model,
+            backbone_key=self.size,
+            imgsz=self.imgsz,
+            extra={
+                "metrics": best_metrics,
+                "auto_positive_threshold": DEFAULT_AUTO_POSITIVE_THRESHOLD,
+                "review_threshold": DEFAULT_REVIEW_THRESHOLD,
+            },
+        )
+        save_classifier_checkpoint(
+            os.path.join(self.run_dir, "last_classifier.pth"),
+            model,
+            backbone_key=self.size,
+            imgsz=self.imgsz,
+            extra={
+                "metrics": best_metrics,
+                "auto_positive_threshold": DEFAULT_AUTO_POSITIVE_THRESHOLD,
+                "review_threshold": DEFAULT_REVIEW_THRESHOLD,
+            },
+        )
+
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
+        axes[0].plot(history["epoch"], history["train_loss"], label="Train Loss")
+        axes[0].plot(history["epoch"], history["val_loss"], label="Val Loss")
+        axes[0].set_title("Loss")
+        axes[0].set_xlabel("Epoch")
+        axes[0].legend()
+
+        axes[1].plot(history["epoch"], history["val_acc"], label="Val Acc")
+        axes[1].plot(history["epoch"], history["val_recall"], label="Val Recall")
+        axes[1].plot(history["epoch"], history["val_f1"], label="Val F1")
+        axes[1].set_title("Validation Metrics")
+        axes[1].set_xlabel("Epoch")
+        axes[1].legend()
+
+        fig.suptitle(f"{format_backbone_label(self.size)} Classification")
+        fig.tight_layout()
+        plot_path = os.path.join(self.run_dir, "results.png")
+        fig.savefig(plot_path, dpi=150)
+        plt.close(fig)
+        self.results_plot_path = plot_path
+
+        with open(os.path.join(self.run_dir, "history.json"), "w") as f:
+            json.dump(history, f, indent=2)
+
+        ModelRegistry.register(self._make_registry_entry())
+        log(f"\nTraining complete! Best model: {best_path}")
 
     def _make_registry_entry(self):
         run_dir = os.path.join(self.output_dir, self.run_name)
         # Ultralytics saves to weights/best.pt; RF-DETR saves checkpoint_best_ema.pth at run root
         if self.backend == "rfdetr":
             weights = self._find_rfdetr_best(run_dir)
+        elif self.backend == "torchvision":
+            weights = os.path.join(run_dir, "best_classifier.pth")
         else:
             weights = os.path.join(run_dir, "weights", "best.pt")
         return {

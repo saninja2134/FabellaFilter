@@ -1,16 +1,16 @@
-# SAM3-Assisted Auto-Labeler with Active Learning.
-# Runs SAM3 in segment-everything mode, then scores/filters masks against
-# features learned from existing labels.  No prompts guide SAM — references
-# are used ONLY for ranking, so SAM discovers all structures before we pick.
-# Roboflow-inspired workflow: predict → review → approve/reject → learn.
+# Model-assisted auto-labeler with active learning.
+# Supports either SAM3 segment-everything or a trained RF-DETR segmentation
+# model as the proposal source. References are still used to rank masks so the
+# review loop remains consistent across backends.
 import cv2
 import os
 import math
 import numpy as np
+import shutil
 
 
 class SAM3AutoLabeler:
-    """SAM3-based assisted labeling with active learning.
+    """Model-assisted labeling with active learning.
 
     Workflow
     --------
@@ -31,10 +31,22 @@ class SAM3AutoLabeler:
     # ── construction ──────────────────────────────────────────────
 
     def __init__(self, image_dir="data/sorted/pos", label_dir="data/labels/seg",
-                 sam_model_path="sam3.pt"):
+                 sam_model_path="sam3.pt", proposal_backend="sam3",
+                 proposal_model_path=None, proposal_threshold=0.80):
         self.image_dir = image_dir
         self.label_dir = label_dir
+        image_root = os.path.dirname(os.path.normpath(image_dir))
+        image_folder = os.path.basename(os.path.normpath(image_dir))
+        self.labeled_dir = os.path.join(image_root, f"{image_folder}_labeled")
+        self.unlabeled_dir = os.path.join(image_root, f"{image_folder}_unlabeled")
         self.sam_model_path = sam_model_path
+        self.proposal_backend = (proposal_backend or "sam3").lower()
+        self.proposal_model_path = proposal_model_path or (
+            "rf-detr-medium-seg-trained.pt"
+            if self.proposal_backend == "rfdetr_seg"
+            else sam_model_path
+        )
+        self.proposal_threshold = float(proposal_threshold)
 
         # Image list
         if os.path.exists(image_dir):
@@ -45,6 +57,8 @@ class SAM3AutoLabeler:
             self.images = []
 
         os.makedirs(label_dir, exist_ok=True)
+        os.makedirs(self.labeled_dir, exist_ok=True)
+        os.makedirs(self.unlabeled_dir, exist_ok=True)
 
         # ── Reference feature pool ────────────────────────────────
         # Each entry: [area, aspect_ratio, compactness, cx, cy]
@@ -69,12 +83,39 @@ class SAM3AutoLabeler:
         # Session statistics
         self.stats = {"approved": 0, "rejected": 0, "edited": 0}
 
+        backend_name = "RF-DETR Seg" if self.proposal_backend == "rfdetr_seg" else "SAM3"
         self.window_name = (
-            "SAM3 Auto-Labeler  |  Y/Space: Approve  |  N: Reject  |  "
+            f"{backend_name} Auto-Labeler  |  Y/Space: Approve  |  N: Reject  |  "
             "E: Edit  |  Tab: Cycle  |  A/D: Nav  |  Q: Quit"
         )
 
-        self.sam_model = None  # loaded lazily in run()
+        self.predictor_model = None  # loaded lazily in run()
+        self._sync_label_folders()
+
+    def _get_image_path(self, image_name):
+        return os.path.join(self.image_dir, image_name)
+
+    def _get_label_path(self, image_name):
+        txt_name = os.path.splitext(image_name)[0] + ".txt"
+        return os.path.join(self.label_dir, txt_name)
+
+    def _sync_image_bucket(self, image_name):
+        src_path = self._get_image_path(image_name)
+        if not os.path.exists(src_path):
+            return
+
+        labeled_path = os.path.join(self.labeled_dir, image_name)
+        unlabeled_path = os.path.join(self.unlabeled_dir, image_name)
+        target_path = labeled_path if self._has_label(image_name) else unlabeled_path
+        other_path = unlabeled_path if target_path == labeled_path else labeled_path
+
+        shutil.copy2(src_path, target_path)
+        if os.path.exists(other_path):
+            os.remove(other_path)
+
+    def _sync_label_folders(self):
+        for image_name in self.images:
+            self._sync_image_bucket(image_name)
 
     # ── feature extraction ────────────────────────────────────────
 
@@ -274,52 +315,97 @@ class SAM3AutoLabeler:
         return img8
 
     def _predict(self, img_path):
-        """Run SAM3 segment-everything, then score & rank by reference similarity."""
-        if self.current_image is None or self.sam_model is None:
+        """Run the selected proposal backend, then score & rank candidates."""
+        if self.current_image is None or self.predictor_model is None:
             return []
         h, w = self.current_image.shape[:2]
         img8 = self._prep_for_sam(img_path)
         if img8 is None:
             return []
 
-        # ── Optional ROI crop for higher effective resolution ─────
-        roi = self._get_roi(h, w)
-        if roi:
-            rx1, ry1, rx2, ry2 = roi
-            crop = img8[ry1:ry2, rx1:rx2]
-            print(f"[SAM3]   Cropped to ROI {rx2-rx1}x{ry2-ry1}  "
-                  f"(full image {w}x{h})")
-        else:
-            crop = img8
-            rx1, ry1 = 0, 0
-
         candidates: list[dict] = []
 
-        try:
-            # Segment-everything: no prompts, SAM finds all masks
-            results = self.sam_model(crop)
-            for r in results:
-                if r.masks is None:
-                    continue
-                for md in r.masks.data:
-                    mask_np = md.cpu().numpy()
-                    poly_crop = self._mask_to_polygon(mask_np)
-                    if len(poly_crop) < 3:
+        if self.proposal_backend == "sam3":
+            # Optional ROI crop for higher effective resolution
+            roi = self._get_roi(h, w)
+            if roi:
+                rx1, ry1, rx2, ry2 = roi
+                crop = img8[ry1:ry2, rx1:rx2]
+                print(f"[AutoLabel]   Cropped to ROI {rx2-rx1}x{ry2-ry1}  "
+                      f"(full image {w}x{h})")
+            else:
+                crop = img8
+                rx1, ry1 = 0, 0
+
+            try:
+                results = self.predictor_model(crop)
+                for r in results:
+                    if r.masks is None:
                         continue
+                    for md in r.masks.data:
+                        mask_np = md.cpu().numpy()
+                        poly_crop = self._mask_to_polygon(mask_np)
+                        if len(poly_crop) < 3:
+                            continue
 
-                    # Map crop coords back to full image then normalise
-                    poly_full = [(px + rx1, py + ry1) for px, py in poly_crop]
-                    poly_norm = [(px / w, py / h) for px, py in poly_full]
+                        poly_full = [(px + rx1, py + ry1) for px, py in poly_crop]
+                        poly_norm = [(px / w, py / h) for px, py in poly_full]
 
-                    score = self._score_mask(poly_norm)
-                    candidates.append({
-                        "polygon": poly_full,
-                        "polygon_norm": poly_norm,
-                        "score": score,
-                        "source": "auto",
-                    })
-        except Exception as e:
-            print(f"[SAM3] prediction error: {e}")
+                        score = self._score_mask(poly_norm)
+                        candidates.append({
+                            "polygon": poly_full,
+                            "polygon_norm": poly_norm,
+                            "score": score,
+                            "source": "sam3",
+                            "tag": f"{score:.0%} (sam3)",
+                        })
+            except Exception as e:
+                print(f"[AutoLabel] SAM3 prediction error: {e}")
+        else:
+            try:
+                from PIL import Image as PILImage
+
+                pil_img = PILImage.fromarray(cv2.cvtColor(img8, cv2.COLOR_BGR2RGB))
+                detections = self.predictor_model.predict(
+                    pil_img, threshold=self.proposal_threshold
+                )
+                masks = getattr(detections, "mask", None)
+                confs = getattr(detections, "confidence", [])
+
+                if masks is not None and len(masks) > 0:
+                    for mask, conf in zip(masks, confs):
+                        poly_full = self._mask_to_polygon(mask)
+                        if len(poly_full) < 3:
+                            continue
+                        poly_norm = [(px / w, py / h) for px, py in poly_full]
+                        ref_score = self._score_mask(poly_norm)
+                        conf = float(conf)
+                        score = conf if not self.ref_features else (0.8 * conf + 0.2 * ref_score)
+                        candidates.append({
+                            "polygon": poly_full,
+                            "polygon_norm": poly_norm,
+                            "score": score,
+                            "source": "rf-detr",
+                            "tag": f"{conf:.0%} (rf-detr)",
+                        })
+                else:
+                    boxes = getattr(detections, "xyxy", [])
+                    for box, conf in zip(boxes, confs):
+                        x1, y1, x2, y2 = [float(v) for v in box]
+                        poly_full = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+                        poly_norm = [(px / w, py / h) for px, py in poly_full]
+                        ref_score = self._score_mask(poly_norm)
+                        conf = float(conf)
+                        score = conf if not self.ref_features else (0.8 * conf + 0.2 * ref_score)
+                        candidates.append({
+                            "polygon": poly_full,
+                            "polygon_norm": poly_norm,
+                            "score": score,
+                            "source": "rf-detr-box",
+                            "tag": f"{conf:.0%} (rf-detr box)",
+                        })
+            except Exception as e:
+                print(f"[AutoLabel] RF-DETR prediction error: {e}")
 
         # Sort by score descending, deduplicate overlapping masks
         candidates.sort(key=lambda c: c["score"], reverse=True)
@@ -336,22 +422,24 @@ class SAM3AutoLabeler:
         """Save approved polygons in YOLO seg format and update reference pool."""
         if not polygons_norm or self.current_image is None:
             return
-        txt = os.path.splitext(self.images[self.index])[0] + ".txt"
-        with open(os.path.join(self.label_dir, txt), 'w') as f:
+        image_name = self.images[self.index]
+        txt = os.path.splitext(image_name)[0] + ".txt"
+        with open(self._get_label_path(image_name), 'w') as f:
             for poly in polygons_norm:
                 flat = []
                 for x, y in poly:
                     flat.append(max(0.0, min(1.0, x)))
                     flat.append(max(0.0, min(1.0, y)))
                 f.write(f"0 {' '.join(f'{v:.6f}' for v in flat)}\n")
+        self._sync_image_bucket(image_name)
         # Active learning: add to reference feature pool
         for poly in polygons_norm:
             self._add_reference(poly)
         print(f"[SAM3] Saved & learned: {txt}  (refs: {len(self.ref_features)})")
 
     def _has_label(self, img_name):
-        txt = os.path.splitext(img_name)[0] + ".txt"
-        return os.path.exists(os.path.join(self.label_dir, txt))
+        label_path = self._get_label_path(img_name)
+        return os.path.exists(label_path) and os.path.getsize(label_path) > 0
 
     def _get_unlabeled(self):
         return [f for f in self.images if not self._has_label(f)]
@@ -443,7 +531,7 @@ class SAM3AutoLabeler:
             # Score label
             if len(pts_scr) > 0:
                 tx, ty = pts_scr[0]
-                tag = f"{score:.0%} ({cand['source']})"
+                tag = cand.get("tag", f"{score:.0%} ({cand['source']})")
                 cv2.putText(display, tag, (tx, ty - 8),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, edge, 2)
 
@@ -476,6 +564,12 @@ class SAM3AutoLabeler:
         hud_lines = [
             f"{img_short}  |  Left: {remaining}  |  Zoom: {self.zoom_level:.1f}x",
             f"Approved: {self.stats['approved']}  Rejected: {self.stats['rejected']}  Edited: {self.stats['edited']}  Refs: {len(self.ref_features)}",
+            (
+                f"Model: {'RF-DETR Seg' if self.proposal_backend == 'rfdetr_seg' else 'SAM3'}"
+                f"  |  Threshold: {self.proposal_threshold:.0%}"
+                if self.proposal_backend == 'rfdetr_seg'
+                else "Model: SAM3 segment-everything"
+            ),
         ]
         if self.mode == "auto":
             n_cand = len(self.proposed_polygons)
@@ -505,42 +599,10 @@ class SAM3AutoLabeler:
         cv2.imshow(self.window_name, display)
 
     def _draw_progress(self, current, total, img_name):
-        """Draw a progress bar during the batch SAM prediction phase."""
-        canvas_h, canvas_w = 950, 1400
-        frame = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-
-        # Title
-        cv2.putText(frame, "SAM3 — Processing All Images",
-                    (canvas_w // 2 - 260, canvas_h // 2 - 80),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 220, 255), 2, cv2.LINE_AA)
-
-        # Current file
-        short = os.path.basename(img_name)[:60]
-        cv2.putText(frame, short,
-                    (canvas_w // 2 - 300, canvas_h // 2 - 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (180, 180, 180), 1, cv2.LINE_AA)
-
-        # Progress bar
-        bar_x, bar_y = 200, canvas_h // 2 + 10
-        bar_w, bar_h = canvas_w - 400, 36
-        pct = current / total if total > 0 else 0
-        cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h),
-                      (60, 60, 60), -1)
-        fill_w = int(bar_w * pct)
-        if fill_w > 0:
-            cv2.rectangle(frame, (bar_x, bar_y), (bar_x + fill_w, bar_y + bar_h),
-                          (0, 200, 100), -1)
-        cv2.rectangle(frame, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h),
-                      (120, 120, 120), 2)
-
-        # Percentage + count
-        pct_txt = f"{pct:.0%}  ({current}/{total})"
-        cv2.putText(frame, pct_txt,
-                    (canvas_w // 2 - 60, bar_y + bar_h + 35),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
-
-        cv2.imshow(self.window_name, frame)
-        cv2.waitKey(1)  # force repaint
+        """Log batch progress without touching OpenCV windows."""
+        if current == 1 or current == total or current % 25 == 0:
+            pct = current / total if total > 0 else 0
+            print(f"[AutoLabel] progress {pct:.0%} ({current}/{total})  {os.path.basename(img_name)[:60]}")
 
     # ── main loop ─────────────────────────────────────────────────
 
@@ -550,11 +612,30 @@ class SAM3AutoLabeler:
             print(f"[SAM3] No images found in {self.image_dir}")
             return
 
-        # Load SAM model
-        print("[SAM3] Loading SAM model …")
-        from ultralytics import SAM
-        self.sam_model = SAM(self.sam_model_path)
-        print("[SAM3] SAM model loaded.")
+        # Load proposal model
+        if self.proposal_backend == "rfdetr_seg":
+            print(f"[AutoLabel] Loading RF-DETR segmentation model from {self.proposal_model_path} …")
+            try:
+                from trainer import get_rfdetr_class
+                cls_name, model_cls = get_rfdetr_class("segment", "m")
+            except Exception as e:
+                print(f"[AutoLabel] Could not import RF-DETR segmentation backend: {e}")
+                return
+            try:
+                self.predictor_model = model_cls(pretrain_weights=self.proposal_model_path)
+                print(f"[AutoLabel] RF-DETR model loaded ({cls_name}).")
+            except Exception as e:
+                print(f"[AutoLabel] Failed to load RF-DETR weights: {e}")
+                return
+        else:
+            print("[AutoLabel] Loading SAM model …")
+            try:
+                from ultralytics import SAM
+            except Exception as e:
+                print(f"[AutoLabel] Could not import ultralytics SAM: {e}")
+                return
+            self.predictor_model = SAM(self.sam_model_path)
+            print("[AutoLabel] SAM model loaded.")
 
         # Build reference pool from existing labels
         self._load_references()
@@ -567,12 +648,8 @@ class SAM3AutoLabeler:
 
         print(f"[SAM3] {len(queue)} unlabeled image(s) to process.")
 
-        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(self.window_name, 1280, 720)
-        cv2.setMouseCallback(self.window_name, self.mouse_callback)
-
-        # ── PHASE 1: Batch predict ALL images with progress bar ───
-        print("[SAM3] Starting batch prediction …")
+        # ── PHASE 1: Batch predict ALL images before opening OpenCV review UI ───
+        print("[AutoLabel] Starting batch prediction …")
         all_predictions: dict[str, list[dict]] = {}
         for i, img_name in enumerate(queue):
             self._draw_progress(i + 1, len(queue), img_name)
@@ -590,9 +667,13 @@ class SAM3AutoLabeler:
 
             n = len(candidates)
             top = f"{candidates[0]['score']:.0%}" if n else "—"
-            print(f"[SAM3]  {i+1}/{len(queue)}  {img_name[:40]}  → {n} mask(s), top {top}")
+            print(f"[AutoLabel]  {i+1}/{len(queue)}  {img_name[:40]}  → {n} mask(s), top {top}")
 
-        print(f"[SAM3] Batch prediction complete. Starting review …\n")
+        print(f"[AutoLabel] Batch prediction complete. Starting review …\n")
+
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        cv2.resizeWindow(self.window_name, 1280, 720)
+        cv2.setMouseCallback(self.window_name, self.mouse_callback)
 
         # ── PHASE 2: Review loop (instant, no waiting) ────────────
         self.queue_pos = 0
@@ -729,7 +810,7 @@ class SAM3AutoLabeler:
     def _print_summary(self):
         total = self.stats["approved"] + self.stats["rejected"] + self.stats["edited"]
         print("\n" + "=" * 50)
-        print("  SAM3 Auto-Labeler — Session Summary")
+        print("  Auto-Labeler — Session Summary")
         print("=" * 50)
         print(f"  Approved (auto):  {self.stats['approved']}")
         print(f"  Rejected:         {self.stats['rejected']}")

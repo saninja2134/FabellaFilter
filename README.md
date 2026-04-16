@@ -50,15 +50,17 @@ pip install -U rfdetr
 FabellaFilter/
 ├── app.py                  # Main UI — entry point
 ├── converter.py            # DICOM → PNG conversion
-├── sorter.py               # Image sorting/review UI
+├── sorter.py               # Image sorting/review UI with classifier triage
 ├── labeler_obb.py          # Oriented Bounding Box annotation
 ├── labeler_seg.py          # Polygon segmentation annotation
-├── labeler_sam.py          # SAM-assisted auto-labeling
+├── labeler_sam.py          # SAM3/RF-DETR model-assisted auto-labeling
 ├── augmentation.py         # Augmentation engine (OpenCV/NumPy)
 ├── prepare_dialog.py       # Augmentation config modal UI
 ├── preparer.py             # Dataset preparation + COCO export
 ├── trainer.py              # Unified multi-architecture trainer
 ├── tester.py               # Unified multi-architecture tester
+├── classifier_utils.py     # Torchvision classifier pipeline utilities
+├── shape_analysis.py       # 2D contour shape analysis tab
 ├── data/
 │   ├── raw/                # Raw DICOM files (pos/ and neg/)
 │   ├── png/                # Converted PNG images
@@ -103,13 +105,23 @@ Select architecture, size, epochs, batch size, and image size, then click **Trai
 | YOLO Seg | ultralytics | YOLO | n, s, m, l, x |
 | YOLO OBB | ultralytics | YOLO | n, s, m, l, x |
 | RT-DETR | ultralytics | YOLO | l, x |
-| RF-DETR | rfdetr | COCO | nano, small, medium, base, large |
+| RF-DETR | rfdetr | COCO | n, s, m, l |
+| RF-DETR Seg | rfdetr | COCO | n, s, m, l, xl, 2xl |
+| Torchvision Classifier | torchvision | sorted_dirs | efficientnet_v2_s, resnet50, resnet18, mobilenet_v3_small |
 
-After training completes, a results chart (loss + class error over epochs) is displayed automatically.
+After training completes, a results chart (loss + val metrics over epochs) is displayed automatically. Classifier runs also save `history.json` with per-epoch metrics.
+
+> **Note:** The Torchvision Classifier trains directly from `data/sorted/pos` and `data/sorted/neg` — no dataset prepare step is needed.
 
 ### 3. Model Testing
 
-Click **Test** to run inference on unsorted images. Results are saved to `output/test_{type}/detected/` and `undetected/`.
+Click **Test** to run inference on unsorted images.
+- Detection/segmentation models: results saved to `output/test_{type}/detected/` and `undetected/`.
+- Classifier models: results saved to `output/test_{type}/auto_positive/`, `review_band/`, and `remaining_manual/`, with score labels drawn on each image.
+
+### 4. Shape Analysis
+
+The **Shape Analysis** tab loads YOLO seg labels from `data/labels/seg` and computes 2D contour metrics (area, perimeter, circularity, solidity, aspect ratio, elongation, equivalent diameter). Results can be visualised as scatter plots or histograms and exported to CSV.
 
 ---
 
@@ -128,10 +140,15 @@ Entry point. Tkinter window with **Dataset Tools** and **Model Training** tabs. 
 `OBBLabeler` — OpenCV annotation tool. Click 3 points to define a rotated rectangle. Saves labels in YOLO OBB format.
 
 ### `labeler_seg.py`
-`SegLabeler` — polygon segmentation annotation tool. Click to place vertices, right-click to close. Saves labels in YOLO segment format.
+`SegLabeler` — polygon segmentation annotation tool. Click to place vertices, right-click to close. Saves labels in YOLO segment format. Automatically mirrors each image into sibling `pos_labeled/` / `pos_unlabeled/` directories as labels are added or removed.
+
+**In-canvas display menu** (press `M` or click the MENU badge, top-right):
+- **Colour swatches** — 8 preset fill colours (Green, Yellow, Cyan, Magenta, Red, Orange, Blue, White); visual only, no effect on saved label files
+- **Opacity cycle** — cycles fill transparency from 0 % (outline only) to 50 % in 10 % steps; also bound to `T`
+- **Direction markers** — toggled via the menu or `V`; places numbered vertex markers at evenly-spaced intervals (e.g. vertices 1, 6, 11, 16, 21 for a 25-point polygon) and shows a CW / CCW winding label above the shape
 
 ### `labeler_sam.py`
-`SAM3AutoLabeler` — SAM-assisted auto-labeling tool for accelerated polygon annotation.
+`SAM3AutoLabeler` — model-assisted auto-labeling tool. Supports SAM3 segment-everything or a trained RF-DETR Seg model as the proposal backend. References are used to rank candidates; the review loop is identical across backends. Images are mirrored into sibling `pos_labeled/` / `pos_unlabeled/` directories as labels are saved.
 
 ### `augmentation.py`
 Pure OpenCV/NumPy augmentation engine. Supports flip, 90° rotate, arbitrary rotation, crop, shear, brightness, exposure, saturation, hue, blur, noise, and mosaic.
@@ -148,16 +165,81 @@ Pure OpenCV/NumPy augmentation engine. Supports flip, 90° rotate, arbitrary rot
 - Sorted negatives priority with raw DICOM fallback
 
 ### `trainer.py`
-`ModelTrainer` — unified trainer with `ARCHITECTURES` registry. Dispatches to ultralytics or RF-DETR backends. RF-DETR training captures stdout for metric parsing and generates results charts. Includes `ModelRegistry` for tracking trained models.
+`ModelTrainer` — unified trainer with `ARCHITECTURES` registry. Dispatches to ultralytics, RF-DETR, or torchvision backends. Torchvision Classifier training uses class-weighted cross-entropy, AdamW, ReduceLROnPlateau, and F1-based early stopping. Generates `best_classifier.pth`, `last_classifier.pth`, `results.png`, and `history.json`. Includes `ModelRegistry` for tracking trained models across all architectures.
 
 ### `tester.py`
-`ModelTester` — architecture-aware inference runner. Draws OBB polygons, segmentation masks, or detection boxes on test images and routes results to `detected/` or `undetected/`.
+`ModelTester` — architecture-aware inference runner. Detection/segmentation models route results to `detected/` or `undetected/`. Classifier models score each image and route to `auto_positive/`, `review_band/`, or `remaining_manual/` with annotated score overlays.
+
+### `classifier_utils.py`
+Shared utilities for the Torchvision Classifier pipeline: backbone registry (EfficientNet V2 S, ResNet50, ResNet18, MobileNet V3 Small), `ImagePathDataset`, train/val transform builders, checkpoint I/O, `predict_fabella_probability`, and `load_png_bgr_for_overlay`.
+
+### `shape_analysis.py`
+`ShapeAnalysisTab` — Tkinter tab embedded in the main notebook. Loads YOLO seg polygon labels, computes 2D shape metrics (area, perimeter, circularity, convexity, solidity, aspect ratio, elongation, equivalent diameter), and displays scatter plots and histograms via embedded Matplotlib. Supports CSV export.
 
 ---
 
 ## Version Log
 
 ### `testing` branch
+
+#### v0.5.1 — Seg Labeler Display Menu
+
+**Seg labeler (`labeler_seg.py`)**
+- In-canvas floating menu panel (toggle `M` or click MENU badge, top-right) with three controls:
+  - **Colour swatches** — 8 preset polygon fill colours; purely visual, no effect on saved labels
+  - **Opacity cycle** — fill transparency 0 %→10 %→…→50 %; also bound to `T`
+  - **Direction markers** — toggle with menu button or `V`; marks up to 5 evenly-spaced polygon vertices with their actual 1-based index (e.g. 1 / 6 / 11 / 16 / 21 for a 25-point polygon) and renders a CW / CCW winding label above the shape
+- Polygon fill/outline colour now derived from `self.poly_color`; outline auto-darkened at 65 %
+- Fill overlay skipped entirely when opacity is 0 %
+- Hint text updated to include `M: Menu | T: Opacity | V: Direction`
+
+#### v0.5.0 — Torchvision Classifier, Shape Analysis, RF-DETR Auto-Label Backend & UI Fixes
+
+**New modules**
+- `classifier_utils.py` — complete binary classification pipeline: backbone registry (EfficientNet V2 S, ResNet50, ResNet18, MobileNet V3 Small), `ImagePathDataset`, augmented train / center-crop val transforms, checkpoint save/load (stores backbone key, imgsz, and triage thresholds), `predict_fabella_probability`, and `load_png_bgr_for_overlay`
+- `shape_analysis.py` — `ShapeAnalysisTab`: Tkinter tab with embedded Matplotlib scatter/histogram plots and summary statistics table for 2D contour metrics computed from YOLO seg labels; CSV export; background threading
+
+**Training (`trainer.py`)**
+- New `Torchvision Classifier` architecture in `ARCHITECTURES` registry (backend `torchvision`, task `classify`, sizes `efficientnet_v2_s` / `resnet50` / `resnet18` / `mobilenet_v3_small`)
+- Full `_train_torchvision_classifier` loop: class-weighted `CrossEntropyLoss`, AdamW (lr=1e-4), `ReduceLROnPlateau` on val F1 (patience=3), F1-based early stopping (patience=10), saves `best_classifier.pth` + `last_classifier.pth`, dual-panel `results.png` at 150 dpi, `history.json`
+- `ModelRegistry` now resolves `best_classifier.pth` for classifier runs; `_infer_from_name` recognises `torchvision_classifier_*` prefixes
+- RF-DETR trainer uses native model resolution from `model_config` instead of rounding UI imgsz to nearest 32; extracted `RFDETR_SEG_TRAIN_KWARGS` and `RFDETR_SEG_LOSS_KWARGS` constants; fixed `xyxy_to_xywh` supervision patch to use in-place copy
+- RF-DETR Seg size tokens updated to `n/s/m/l/xl/2xl`
+
+**Testing (`tester.py`)**
+- Classifier test path creates three subdirs: `auto_positive/`, `review_band/`, `remaining_manual/`
+- Score + band label drawn on each output image with colour coding (green / orange / grey)
+- Reads stored thresholds from checkpoint metadata
+
+**Sorting UI (`sorter.py`)**
+- New `ClassifierTriageDialog`: model picker from `ModelRegistry`, configurable auto-positive and review thresholds with validation
+- `MODEL TRIAGE` button in `FabellaCleaner`: runs selected classifier over remaining images, auto-moves high-confidence positives to `sorted/pos`, queues review-band images first
+- Per-image model score label with colour-coded band display (AUTO-POSITIVE / REVIEW BAND / MANUAL)
+
+**Main app (`app.py`)**
+- `Shape Analysis` tab added to the main notebook
+- `AutoLabelerConfigDialog`: selects SAM3 or RF-DETR Seg backend and confidence threshold before launching the auto-labeler
+- UI thread-safety: all `root.after(0, ...)` calls replaced with a `queue.Queue` + 50 ms pump (`_enqueue_ui` / `_drain_ui_queue`), with graceful `TclError` suppression on window close
+- Size combobox widened to 20; `_on_size_change` auto-sets imgsz to the backbone's recommended default for classifier architectures
+- Prepare dataset blocked with an info message for classifier arch (no YOLO prepare needed)
+
+**Auto-labeler (`labeler_sam.py`)**
+- Dual proposal backends: SAM3 segment-everything (unchanged) or a trained RF-DETR Seg model, selectable at launch
+- `labeled_dir` / `unlabeled_dir` sibling folders auto-created and backfilled on init; updated on every label save
+- `_has_label` now checks file size > 0; `_draw_progress` replaced with console-only output to avoid corrupting the review OpenCV window
+- OpenCV review window opened after batch prediction completes (not before)
+- HUD displays active backend and threshold per frame
+
+**Seg labeler (`labeler_seg.py`)**
+- `labeled_dir` / `unlabeled_dir` sync logic (same as SAM labeler): backfilled on init, updated on save and navigation
+- `has_saved_label` checks size > 0
+
+**Augmentation & preparer fixes**
+- `_transform_labels_resize`: new function to remap normalised polygon coordinates through the same Stretch / Fit-Pad / Crop transform applied to the image
+- `apply_preprocessing_with_labels`: new public API pairing image and label transforms
+- `apply_preprocessing`: default width/height now reads from `img.shape` instead of hardcoded 1024
+- `_to_uint8`: fixed `cv2.normalize()` to pass an explicit `np.empty` dst buffer (avoids crash in newer OpenCV)
+- `YoloPreparer._process_single`: uses `apply_preprocessing_with_labels` so label coordinates stay aligned after resize
 
 #### v0.4.0 — Rename, Simplify & Compress
 - **Renamed all modules** to clear, intuitive names (see Project Structure)
