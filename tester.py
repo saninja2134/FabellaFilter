@@ -180,13 +180,19 @@ class ModelTester:
         from ultralytics import YOLO
         model = YOLO(self.model_path)
 
+        try:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+        except ImportError:
+            device = "cpu"
+
         for i, img_name in enumerate(batch):
             img_path   = os.path.join(self.src_dir, img_name)
             img_visual = self._prep_visual(img_path)
             if img_visual is None:
                 continue
 
-            results = model.predict(source=img_path, conf=0.25, imgsz=1024, verbose=False)
+            results = model.predict(source=img_path, conf=0.25, imgsz=1024, verbose=False, device=device)
             result  = results[0]
             has_det = False
 
@@ -238,10 +244,22 @@ class ModelTester:
         log(f"Loading {cls_name} from {self.model_path}...")
         try:
             model = model_cls(pretrain_weights=self.model_path)
+            try:
+                import torch
+                device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+                model.to(device)
+            except Exception as dev_err:
+                log(f"Warning: Could not move RF-DETR model to device: {dev_err}")
         except Exception as e:
             log(f"Error loading finetuned weights: {e}")
             log("Falling back to default pretrained weights...")
             model = model_cls()
+            try:
+                import torch
+                device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+                model.to(device)
+            except Exception:
+                pass
 
         from PIL import Image as PILImage
         for i, img_name in enumerate(batch):

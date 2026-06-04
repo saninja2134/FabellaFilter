@@ -183,6 +183,12 @@ class PredictionProgressWindow(tk.Toplevel):
                     return
                 try:
                     self.labeler.predictor_model = model_cls(pretrain_weights=self.labeler.proposal_model_path)
+                    try:
+                        import torch
+                        device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+                        self.labeler.predictor_model.to(device)
+                    except Exception as dev_err:
+                        print(f"[AutoLabel] Could not move RF-DETR model to device: {dev_err}")
                 except Exception as e:
                     self.after(0, lambda: messagebox.showerror("Error", f"Failed to load RF-DETR weights: {e}", parent=self))
                     self.cancelled = True
@@ -578,6 +584,12 @@ class SAM3AutoLabeler:
         if img8 is None:
             return []
 
+        try:
+            import torch
+            device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+        except ImportError:
+            device = "cpu"
+
         candidates: list[dict] = []
 
         if self.proposal_backend == "sam3":
@@ -593,7 +605,7 @@ class SAM3AutoLabeler:
                 rx1, ry1 = 0, 0
 
             try:
-                results = self.predictor_model(crop)
+                results = self.predictor_model(crop, device=device)
                 for r in results:
                     if r.masks is None:
                         continue
@@ -900,6 +912,12 @@ class SAM3AutoLabeler:
                     return
                 try:
                     self.predictor_model = model_cls(pretrain_weights=self.proposal_model_path)
+                    try:
+                        import torch
+                        device = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+                        self.predictor_model.to(device)
+                    except Exception as dev_err:
+                        print(f"[AutoLabel] Could not move RF-DETR model to device: {dev_err}")
                     print(f"[AutoLabel] RF-DETR model loaded ({cls_name}).")
                 except Exception as e:
                     print(f"[AutoLabel] Failed to load RF-DETR weights: {e}")
