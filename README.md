@@ -182,6 +182,53 @@ Shared utilities for the Torchvision Classifier pipeline: backbone registry (Eff
 
 ### `testing` branch
 
+#### v0.5.5 — High-Performance LineCollection Plotting & Scan Completed Warnings
+
+**Vectorized Contour Plotting ([shape_analysis.py](shape_analysis.py))**
+- Replaced slow, iterative Matplotlib `.plot()` calls inside `_render_alignment_figure` with vectorized `matplotlib.collections.LineCollection` arrays.
+- Eliminates multi-minute UI freeze and "Not Responding" thread locks when parsing large clinical cohorts (e.g., over 1,300 complex contours), converting rendering transactions into near-instantaneous canvas draws.
+- Manually bounds axes limits with 5% outer safety padding margins to properly auto-scale Procrustes alignments inside both comparative grids.
+
+**Cohort Generation Warnings ([shape_analysis.py](shape_analysis.py))**
+- Intercepted background analysis callback routines inside `_on_analysis_complete` to trigger a clean informational dialog modal (`messagebox.showinfo`) upon successful cohort scans.
+- Informs the user that the database compilation has completed and that the program is now preparing demographics matrices, PCA grids, and scree diagrams, instructing them to pause interactions while plots finalise.
+
+#### v0.5.4 — Cross-Platform Compatibility & Changeable Shape-Analysis Metadata Root
+
+**Cross-Platform Paths ([shape_analysis.py](shape_analysis.py))**
+- Resolved path failures occurring when moving the application from Windows to Linux/Ubuntu by decoupling the hardcoded Windows path `E:\Emory`.
+- Configured a local platform-agnostic fallback to the workspace's `data/` directory using `os.path.normpath` and `os.path.join`, ensuring automatic error-free execution on non-Windows operating systems.
+
+**Interactive Path Selection ([shape_analysis.py](shape_analysis.py))**
+- Integrated an intuitive **Folder Paths Configuration** card directly within the **Shape Analysis** tab, featuring a styled entry box bound to `self.emory_root_var` and a "Browse..." button mapped to Tkinter's `filedialog.askdirectory`.
+- Added manual `<Return>` entry binding to let users easily type arbitrary paths, hit Enter, and trigger instant, threaded rescans of the new demographic/clinical databases.
+- Disabled the shape-analysis computation from starting automatically on application load, allowing users to configure or inspect their targets before manual execution via the **Refresh / Rescan** panel.
+
+#### v0.5.3 — Thread-Safe Background Auto-Labeler with Dynamic Compute Throttling
+
+**Non-Blocking Active Predictor Window ([labeler_sam.py](labeler_sam.py))**
+- Replaced the blocking synchronous batch segmentation pipeline with a modern, non-blocking Thread/Modal progress dialog architecture. Background-threaded processing keeps the application 100% interactive and avoids OS "Not Responding" or lock-up messages.
+- Added mouse pointer tracking using `winfo_pointerxy()` to assess system-wide computer usage. When active interaction is detected, prediction introduces brief custom sleep delays to yield hardware resources to user applications, restoring maximum compute speed once the user is idle.
+- Implemented real-time status logging, status color badges (Idle/Active), a **Pause/Resume Model** toggle button to suspend and restart model predictions at will, and a **Cancel / Exit** process button.
+
+**Compute Optimization Control ([app.py](app.py))**
+- Integrated dynamic compute optimization settings inside the **Auto-Label Model Setup** configuration dialog, featuring full-theme support, a dynamic bypass checkbutton, and customized float inputs for active processing delays and idle timeouts.
+- Configured safe callback handlers to pass parent bindings and dynamic throttle variables into the SAM3 and RF-DETR auto-labelers.
+
+#### v0.5.2 — Dynamic Folder Path Configuration & Selection
+
+**Folder Configuration UI (`app.py`)**
+- Added a brand-new **Folder Paths Configuration** panel directly within the **Dataset Tools** tab in the main UI, featuring 2-column grid alignment, styling consistent with VS Code Dark Theme, and "Browse..." buttons connected to Tkinter `filedialog.askdirectory`.
+- Replaced all hardcoded string paths in data-scanning modules (Convert DICOM, Clean Dataset, Sort Negatives, Label OBB, Label Segmentation, SAM3 Auto-Label, Dataset Preparation, and Model Testing) with dynamic Tkinter `tk.StringVar` references (`self.raw_dir_var`, `self.png_dir_var`, `self.sorted_dir_var`, `self.discarded_dir_var`, `self.obb_label_dir_var`, and `self.seg_label_dir_var`).
+- Integrated double-direction dynamic trace bindings so editing or browsing a folder path immediately triggers `_refresh_dataset_stats()` and refreshes the **Dataset Overview** overview panel in real-time.
+
+**Flexible Tool Integration**
+- **DICOM Converter (`converter.py` / `app.py`)** — instantiates with custom source raw folder and target PNG folder.
+- **Dataset Cleaner / Negative Sorter (`sorter.py` / `app.py`)** — instantiates `FabellaCleaner` with custom source/keep/discard target directories under the hood.
+- **OBB, Segmentation & Active SAM Labelers (`labeler_obb.py` / `labeler_seg.py` / `labeler_sam.py` / `app.py`)** — custom image and label folders are passed to constructors and resolved cleanly.
+- **Dataset Preparation (`preparer.py` / `prepare_dialog.py` / `app.py`)** — updated `YoloPreparer` and `DatasetGeneratorModal` to accept customizable image and label directories, establishing clean relative paths dynamically.
+- **Model Training & Testing (`trainer.py` / `tester.py` / `app.py`)** — updated `ModelTrainer` to pass customized positive/negative sorted validation parameters to `gather_sorted_samples`, and updated `ModelTester` to use live image and sorted output folder parameters.
+
 #### v0.5.1 — Seg Labeler Display Menu
 
 **Seg labeler (`labeler_seg.py`)**

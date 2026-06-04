@@ -239,7 +239,8 @@ def build_yolo_model_name(arch, version, size):
 class ModelTrainer:
     # Unified trainer. Architecture-aware dispatch at runtime.
     def __init__(self, arch="YOLO Seg", version="11", size="n",
-                 epochs=100, imgsz=1024, batch=4):
+                 epochs=100, imgsz=1024, batch=4,
+                 pos_dir="data/sorted/pos", neg_dir="data/sorted/neg"):
         # Args:
         # arch    : one of ARCHITECTURES keys
         # version : model version string (ignored for RT-DETR/RF-DETR)
@@ -249,6 +250,8 @@ class ModelTrainer:
         # epochs  : training epochs
         # imgsz   : input image size (square)
         # batch   : batch size
+        # pos_dir : directory of sorted positive images
+        # neg_dir : directory of sorted negative images
         info = get_arch_info(arch)
         self.arch    = arch
         self.version = version
@@ -259,6 +262,8 @@ class ModelTrainer:
         self.epochs  = epochs
         self.imgsz   = imgsz
         self.batch   = batch
+        self.pos_dir = pos_dir
+        self.neg_dir = neg_dir
 
         # Derive paths
         if self.task == "obb":
@@ -284,8 +289,16 @@ class ModelTrainer:
                     except ValueError:
                         pass
         self.run_name   = f"{base_name}_v{next_v}"
-        self.data_yaml  = f"data/yolo/data_{task_key}.yaml"
-        self.coco_dir   = f"data/coco"
+        
+        # Derive paths relative to customized directories
+        try:
+            base_parent = os.path.dirname(os.path.dirname(os.path.normpath(pos_dir)))
+            self.data_yaml  = os.path.join(base_parent, "yolo", f"data_{task_key}.yaml")
+            self.coco_dir   = os.path.join(base_parent, "coco")
+        except Exception:
+            self.data_yaml  = f"data/yolo/data_{task_key}.yaml"
+            self.coco_dir   = f"data/coco"
+            
         self.results_plot_path = None   # set after training if a chart was generated
 
     @property

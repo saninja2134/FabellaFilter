@@ -7,6 +7,253 @@ import os
 import math
 import numpy as np
 import shutil
+import tkinter as tk
+from tkinter import ttk, messagebox
+import threading
+import time
+
+
+class PredictionProgressWindow(tk.Toplevel):
+    def __init__(self, parent, queue_images, labeler_instance, title="Initializing Active Predictor..."):
+        super().__init__(parent)
+        self.title(title)
+        self.geometry("620x460")
+        self.configure(bg="#1E1E1E")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()  # modal
+
+        self.labeler = labeler_instance
+        self.queue_images = queue_images
+        self.predictions = {}
+        self.paused = False
+        self.user_active = False
+        self.done_predicting = False
+        self.cancelled = False
+
+        # Activity tracking (using global pointer location as a proxy for computer activity)
+        self.last_gx, self.last_gy = self.winfo_pointerxy()
+        self.last_interaction_time = time.time() - 10.0  # start as idle
+
+        # Style configurations
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure("Predict.Horizontal.TProgressbar", foreground="#007ACC", background="#007ACC", thickness=15)
+
+        # Title / Model Phase
+        self.phase_var = tk.StringVar(value="Loading proposal model...")
+        tk.Label(self, textvariable=self.phase_var,
+                 font=("Segoe UI", 11, "bold"), bg="#1E1E1E", fg="#E0E0E0").pack(
+            padx=20, pady=(18, 4), anchor=tk.W)
+
+        # Progress bar
+        self.pct_var = tk.IntVar(value=0)
+        self.bar = ttk.Progressbar(self, variable=self.pct_var, maximum=100,
+                                   mode="determinate", length=580, style="Predict.Horizontal.TProgressbar")
+        self.bar.pack(padx=20, pady=(0, 4))
+
+        self.pct_label_var = tk.StringVar(value="0%")
+        tk.Label(self, textvariable=self.pct_label_var,
+                 font=("Segoe UI", 9), bg="#1E1E1E", fg="#888888").pack(anchor=tk.E, padx=20)
+
+        # User Interaction Status panel
+        status_frame = tk.Frame(self, bg="#252526", highlightbackground="#3E3E3E", highlightthickness=1)
+        status_frame.pack(fill=tk.X, padx=20, pady=8)
+        
+        tk.Label(status_frame, text="Active Compute Mode (Auto-Regulated):", font=("Segoe UI", 9, "bold"),
+                 bg="#252526", fg="#007ACC").pack(anchor=tk.W, padx=12, pady=(6, 2))
+                 
+        self.status_var = tk.StringVar(value="Detecting user activity...")
+        self.status_label = tk.Label(status_frame, textvariable=self.status_var,
+                                     font=("Segoe UI", 9), bg="#252526", fg="#E0E0E0")
+        self.status_label.pack(anchor=tk.W, padx=12, pady=(0, 6))
+
+        # Log Area
+        log_frame = tk.Frame(self, bg="#1E1E1E")
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(6, 0))
+        self._log_text = tk.Text(log_frame, height=9, bg="#252526", fg="#CCCCCC",
+                                 font=("Consolas", 8), state=tk.DISABLED)
+        self._log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb = ttk.Scrollbar(log_frame, command=self._log_text.yview)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._log_text.config(yscrollcommand=sb.set)
+
+        # Buttons Panel
+        btn_frame = tk.Frame(self, bg="#1E1E1E")
+        btn_frame.pack(fill=tk.X, pady=12, padx=20)
+
+        self.pause_btn = tk.Button(btn_frame, text="⏸ Pause Model",
+                                   bg="#333333", fg="white", relief=tk.FLAT,
+                                   font=("Segoe UI", 9, "bold"), cursor="hand2",
+                                   command=self.toggle_pause, width=16,
+                                   activebackground="#444444", activeforeground="white")
+        self.pause_btn.pack(side=tk.LEFT)
+
+        self.cancel_btn = tk.Button(btn_frame, text="Cancel / Exit",
+                                    bg="#A82020", fg="white", relief=tk.FLAT,
+                                    font=("Segoe UI", 9), cursor="hand2",
+                                    command=self.on_cancel, width=14,
+                                    activebackground="#C23030", activeforeground="white")
+        self.cancel_btn.pack(side=tk.RIGHT)
+
+        # Listen to activity inside our Toplevel window
+        self.bind("<Any-KeyPress>", self.register_local_interaction)
+        self.bind("<Any-ButtonPress>", self.register_local_interaction)
+        self.bind("<Motion>", self.register_local_interaction)
+
+        # Start background helper threads/jobs
+        self.monitor_activity()
+        self.start_prediction_thread()
+
+    def register_local_interaction(self, event=None):
+        self.last_interaction_time = time.time()
+
+    def monitor_activity(self):
+        try:
+            gx, gy = self.winfo_pointerxy()
+            if (gx, gy) != (self.last_gx, self.last_gy):
+                self.last_interaction_time = time.time()
+                self.last_gx, self.last_gy = gx, gy
+            
+            idle_dur = time.time() - self.last_interaction_time
+            if not self.labeler.throttle_on_activity:
+                self.user_active = False
+                self.status_var.set("Compute Limiter Disabled (Always MAX Speed)")
+                self.status_label.config(fg="#888888")
+            elif idle_dur < self.labeler.idle_timeout:
+                self.user_active = True
+                self.status_var.set(
+                    f"User Active — Reducing Compute (Sleeping {self.labeler.throttle_delay:.1f}s) "
+                    f"[Idle in {self.labeler.idle_timeout - idle_dur:.1f}s]"
+                )
+                self.status_label.config(fg="#FF9800")  # Soft orange
+            else:
+                self.user_active = False
+                self.status_var.set("User Idle — Allocating Full Force (Max Compute Speed)")
+                self.status_label.config(fg="#4CAF50")  # Soft green
+        except Exception:
+            pass
+
+        if not self.done_predicting and not self.cancelled:
+            self.after(200, self.monitor_activity)
+
+    def toggle_pause(self):
+        self.paused = not self.paused
+        if self.paused:
+            self.pause_btn.config(text="▶ Resume Model", bg="#2E7D32")
+            self.append_log("[Paused] Model execution paused. Window stays open but model is sleeping.")
+        else:
+            self.pause_btn.config(text="⏸ Pause Model", bg="#333333")
+            self.append_log("[Resumed] Model execution resumed.")
+
+    def on_cancel(self):
+        if messagebox.askyesno("Cancel Model", "Are you sure you want to stop batch prediction and close?", parent=self):
+            self.cancelled = True
+            self.done_predicting = True
+            self.destroy()
+
+    def update_step(self, pct, label):
+        self.pct_var.set(pct)
+        self.pct_label_var.set(f"{pct}%")
+        if label:
+            self.phase_var.set(label)
+
+    def append_log(self, msg):
+        self._log_text.config(state=tk.NORMAL)
+        self._log_text.insert(tk.END, msg + "\n")
+        self._log_text.see(tk.END)
+        self._log_text.config(state=tk.DISABLED)
+
+    def start_prediction_thread(self):
+        t = threading.Thread(target=self._prediction_worker, daemon=True)
+        t.start()
+
+    def _prediction_worker(self):
+        try:
+            # 1. Load proposal model
+            if self.labeler.proposal_backend == "rfdetr_seg":
+                self.after(0, lambda: self.update_step(0, "Loading RF-DETR segmentation model..."))
+                try:
+                    from trainer import get_rfdetr_class
+                    cls_name, model_cls = get_rfdetr_class("segment", "m")
+                except Exception as e:
+                    self.after(0, lambda: messagebox.showerror("Error", f"Could not import RF-DETR: {e}", parent=self))
+                    self.cancelled = True
+                    self.after(0, self.destroy)
+                    return
+                try:
+                    self.labeler.predictor_model = model_cls(pretrain_weights=self.labeler.proposal_model_path)
+                except Exception as e:
+                    self.after(0, lambda: messagebox.showerror("Error", f"Failed to load RF-DETR weights: {e}", parent=self))
+                    self.cancelled = True
+                    self.after(0, self.destroy)
+                    return
+            else:
+                self.after(0, lambda: self.update_step(0, "Loading SAM model..."))
+                try:
+                    from ultralytics import SAM
+                except Exception as e:
+                    self.after(0, lambda: messagebox.showerror("Error", f"Could not import ultralytics SAM: {e}", parent=self))
+                    self.cancelled = True
+                    self.after(0, self.destroy)
+                    return
+                self.labeler.predictor_model = SAM(self.labeler.sam_model_path)
+
+            self.after(0, lambda: self.append_log("[Model] Model loaded successfully."))
+            
+            # Load references
+            self.labeler._load_references()
+
+            # Iterate through queue images
+            total = len(self.queue_images)
+            for i, img_name in enumerate(self.queue_images):
+                # Check for cancellation
+                if self.cancelled:
+                    return
+
+                # Check for pause
+                while self.paused:
+                    if self.cancelled:
+                        return
+                    time.sleep(0.12)
+
+                # Active compute limiting sleep
+                if self.user_active:
+                    time.sleep(self.labeler.throttle_delay)
+
+                pct = int((i / total) * 100)
+                self.after(0, lambda i=i, pct=pct, img_name=img_name: self.update_step(
+                    pct, f"Segmenting image {i+1} of {total}..."
+                ))
+                self.after(0, lambda img_name=img_name: self.append_log(f"Processing {img_name[:35]}..."))
+
+                img_path = os.path.join(self.labeler.image_dir, img_name)
+                raw = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+                if raw is None:
+                    self.predictions[img_name] = []
+                    continue
+
+                # Temporary store
+                self.labeler.current_image = raw
+                candidates = self.labeler._predict(img_path)
+                self.predictions[img_name] = candidates
+
+                n_cand = len(candidates)
+                top_score = f"{candidates[0]['score']:.0%}" if n_cand else "—"
+                self.after(0, lambda img_name=img_name, n=n_cand, top=top_score: self.append_log(
+                    f"  ↳ Done: {n} mask(s) found, top score {top}"
+                ))
+
+            if not self.cancelled:
+                self.after(0, lambda: self.update_step(100, "Done! Starting review UI..."))
+                self.done_predicting = True
+                time.sleep(0.8)
+                self.after(0, self.destroy)
+
+        except Exception as err:
+            self.after(0, lambda err=err: messagebox.showerror("Prediction Error", f"An error occurred: {err}", parent=self))
+            self.cancelled = True
+            self.after(0, self.destroy)
 
 
 class SAM3AutoLabeler:
@@ -32,7 +279,9 @@ class SAM3AutoLabeler:
 
     def __init__(self, image_dir="data/sorted/pos", label_dir="data/labels/seg",
                  sam_model_path="sam3.pt", proposal_backend="sam3",
-                 proposal_model_path=None, proposal_threshold=0.80):
+                 proposal_model_path=None, proposal_threshold=0.80,
+                 throttle_on_activity=True, throttle_delay=1.5, idle_timeout=5.0,
+                 parent=None):
         self.image_dir = image_dir
         self.label_dir = label_dir
         image_root = os.path.dirname(os.path.normpath(image_dir))
@@ -47,6 +296,12 @@ class SAM3AutoLabeler:
             else sam_model_path
         )
         self.proposal_threshold = float(proposal_threshold)
+        
+        # Compute limit options
+        self.throttle_on_activity = throttle_on_activity
+        self.throttle_delay = float(throttle_delay)
+        self.idle_timeout = float(idle_timeout)
+        self.parent = parent
 
         # Image list
         if os.path.exists(image_dir):
@@ -612,31 +867,6 @@ class SAM3AutoLabeler:
             print(f"[SAM3] No images found in {self.image_dir}")
             return
 
-        # Load proposal model
-        if self.proposal_backend == "rfdetr_seg":
-            print(f"[AutoLabel] Loading RF-DETR segmentation model from {self.proposal_model_path} …")
-            try:
-                from trainer import get_rfdetr_class
-                cls_name, model_cls = get_rfdetr_class("segment", "m")
-            except Exception as e:
-                print(f"[AutoLabel] Could not import RF-DETR segmentation backend: {e}")
-                return
-            try:
-                self.predictor_model = model_cls(pretrain_weights=self.proposal_model_path)
-                print(f"[AutoLabel] RF-DETR model loaded ({cls_name}).")
-            except Exception as e:
-                print(f"[AutoLabel] Failed to load RF-DETR weights: {e}")
-                return
-        else:
-            print("[AutoLabel] Loading SAM model …")
-            try:
-                from ultralytics import SAM
-            except Exception as e:
-                print(f"[AutoLabel] Could not import ultralytics SAM: {e}")
-                return
-            self.predictor_model = SAM(self.sam_model_path)
-            print("[AutoLabel] SAM model loaded.")
-
         # Build reference pool from existing labels
         self._load_references()
 
@@ -648,26 +878,62 @@ class SAM3AutoLabeler:
 
         print(f"[SAM3] {len(queue)} unlabeled image(s) to process.")
 
-        # ── PHASE 1: Batch predict ALL images before opening OpenCV review UI ───
-        print("[AutoLabel] Starting batch prediction …")
-        all_predictions: dict[str, list[dict]] = {}
-        for i, img_name in enumerate(queue):
-            self._draw_progress(i + 1, len(queue), img_name)
+        # Check if we should use Tkinter dialog or command line progress
+        if self.parent is not None:
+            progress_win = PredictionProgressWindow(self.parent, queue, self, title="SAM3 / RF-DETR Auto-Predictor")
+            self.parent.wait_window(progress_win)
+            
+            if progress_win.cancelled:
+                print("[AutoLabel] Group prediction cancelled by user.")
+                return
+                
+            all_predictions = progress_win.predictions
+        else:
+            # Load proposal model
+            if self.proposal_backend == "rfdetr_seg":
+                print(f"[AutoLabel] Loading RF-DETR segmentation model from {self.proposal_model_path} …")
+                try:
+                    from trainer import get_rfdetr_class
+                    cls_name, model_cls = get_rfdetr_class("segment", "m")
+                except Exception as e:
+                    print(f"[AutoLabel] Could not import RF-DETR segmentation backend: {e}")
+                    return
+                try:
+                    self.predictor_model = model_cls(pretrain_weights=self.proposal_model_path)
+                    print(f"[AutoLabel] RF-DETR model loaded ({cls_name}).")
+                except Exception as e:
+                    print(f"[AutoLabel] Failed to load RF-DETR weights: {e}")
+                    return
+            else:
+                print("[AutoLabel] Loading SAM model …")
+                try:
+                    from ultralytics import SAM
+                except Exception as e:
+                    print(f"[AutoLabel] Could not import ultralytics SAM: {e}")
+                    return
+                self.predictor_model = SAM(self.sam_model_path)
+                print("[AutoLabel] SAM model loaded.")
 
-            img_path = os.path.join(self.image_dir, img_name)
-            raw = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
-            if raw is None:
-                all_predictions[img_name] = []
-                continue
+            # ── PHASE 1: Fallback Batch predict ALL images before opening OpenCV review UI on CLI ───
+            print("[AutoLabel] Starting batch prediction …")
+            all_predictions: dict[str, list[dict]] = {}
+            for i, img_name in enumerate(queue):
+                self._draw_progress(i + 1, len(queue), img_name)
 
-            # Store temporarily for _predict
-            self.current_image = raw
-            candidates = self._predict(img_path)
-            all_predictions[img_name] = candidates
+                img_path = os.path.join(self.image_dir, img_name)
+                raw = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+                if raw is None:
+                    all_predictions[img_name] = []
+                    continue
 
-            n = len(candidates)
-            top = f"{candidates[0]['score']:.0%}" if n else "—"
-            print(f"[AutoLabel]  {i+1}/{len(queue)}  {img_name[:40]}  → {n} mask(s), top {top}")
+                # Store temporarily for _predict
+                self.current_image = raw
+                candidates = self._predict(img_path)
+                all_predictions[img_name] = candidates
+
+                n = len(candidates)
+                top = f"{candidates[0]['score']:.0%}" if n else "—"
+                print(f"[AutoLabel]  {i+1}/{len(queue)}  {img_name[:40]}  → {n} mask(s), top {top}")
 
         print(f"[AutoLabel] Batch prediction complete. Starting review …\n")
 

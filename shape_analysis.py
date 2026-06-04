@@ -995,7 +995,11 @@ class ShapeAnalysisTab(tk.Frame):
         self.status_callback = status_callback
 
         self.project_root = os.path.abspath(os.path.dirname(__file__))
-        self.emory_root = r"E:\Emory"
+        
+        default_emory = r"E:\Emory"
+        if not os.path.exists(default_emory):
+            default_emory = os.path.normpath(os.path.join(self.project_root, "data"))
+        self.emory_root_var = tk.StringVar(value=default_emory)
 
         self.manual_overrides: Dict[str, ManualOverride] = {}
         self.raw_dataset: Optional[RawDataset] = None
@@ -1031,7 +1035,6 @@ class ShapeAnalysisTab(tk.Frame):
         self._build_scroll_shell()
         self._build_ui()
         self._schedule_ui_pump()
-        self.after(350, lambda: self.refresh_analysis(rescan=True))
 
     def destroy(self) -> None:
         if self._ui_pump_job is not None:
@@ -1235,6 +1238,48 @@ class ShapeAnalysisTab(tk.Frame):
             fg=self.accent_color,
             font=("Segoe UI", 9, "bold"),
         ).pack(side=tk.LEFT, padx=(12, 0))
+
+        # ── Folder Paths Configuration Card ───────────────────────
+        cfg_card = self._card(self.content_frame, "Folder Paths Configuration")
+        cfg_card.pack(fill=tk.X, padx=16, pady=(0, 10))
+
+        grid_frame = tk.Frame(cfg_card, bg=self.card_bg)
+        grid_frame.pack(fill=tk.X)
+
+        tk.Label(
+            grid_frame,
+            text="Emory Metadata Root:",
+            bg=self.card_bg,
+            fg=self.fg_color,
+            font=("Segoe UI", 9),
+        ).pack(side=tk.LEFT, padx=(5, 5))
+
+        ent = tk.Entry(
+            grid_frame,
+            textvariable=self.emory_root_var,
+            width=60,
+            bg="#3C3C3C",
+            fg="white",
+            insertbackground="white",
+            relief=tk.FLAT,
+        )
+        ent.pack(side=tk.LEFT, padx=(0, 5), fill=tk.X, expand=True)
+        ent.bind("<Return>", lambda _event: self.refresh_analysis(rescan=True))
+
+        btn = tk.Button(
+            grid_frame,
+            text="Browse...",
+            font=("Segoe UI", 8),
+            bg=self.button_bg,
+            fg="white",
+            activebackground=self.button_active,
+            activeforeground="white",
+            relief=tk.FLAT,
+            command=self._browse_emory_root,
+            padx=12,
+            cursor="hand2",
+        )
+        btn.pack(side=tk.LEFT, padx=(0, 10))
 
         summary_card = self._card(self.content_frame, "Cohort Summary")
         summary_card.pack(fill=tk.X, padx=16, pady=(0, 10))
@@ -1573,6 +1618,15 @@ class ShapeAnalysisTab(tk.Frame):
         stats_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.stats_tree.configure(yscrollcommand=stats_scroll.set)
 
+    def _browse_emory_root(self) -> None:
+        initial = self.emory_root_var.get()
+        if not os.path.exists(initial):
+            initial = os.getcwd()
+        d = filedialog.askdirectory(parent=self, title="Select Emory Clinical Metadata Root Directory", initialdir=initial)
+        if d:
+            self.emory_root_var.set(os.path.normpath(d))
+            self.refresh_analysis(rescan=True)
+
     def refresh_analysis(self, *, rescan: bool) -> None:
         self._analysis_generation += 1
         generation = self._analysis_generation
@@ -1586,7 +1640,7 @@ class ShapeAnalysisTab(tk.Frame):
             try:
                 dataset = self.raw_dataset
                 if rescan or dataset is None:
-                    dataset = load_raw_dataset(self.project_root, self.emory_root, worker_log)
+                    dataset = load_raw_dataset(self.project_root, self.emory_root_var.get(), worker_log)
                 results = process_dataset(dataset, self.manual_overrides)
                 self._enqueue_ui_task(
                     lambda dataset=dataset, results=results: self._on_analysis_complete(generation, dataset, results)
@@ -1603,6 +1657,16 @@ class ShapeAnalysisTab(tk.Frame):
         self.raw_dataset = dataset
         self.results = results
         self._set_status("Shape-analysis cohort ready")
+
+        # Friendly scan-completed explanatory popup informing the user of the PCA & metrics pipeline rendering sequence
+        messagebox.showinfo(
+            "Database Scan Complete",
+            "Clinical database scan completed successfully!\n\n"
+            "Click OK to render the shape workspace plots and prepare PCA results.\n"
+            "This sequence will design PCA shape-spaces, compile demographics, and render metrics tables.",
+            parent=self
+        )
+
         self._update_summary()
         self._populate_audit_table()
         self._refresh_factor_controls()
@@ -1795,11 +1859,36 @@ class ShapeAnalysisTab(tk.Frame):
             axis.set_ylabel("Y")
         before_axis.set_title("Before Procrustes")
         after_axis.set_title("After Procrustes")
-        for record in self.results.records:
-            before = close_points(record.pre_procrustes_points)
-            after = close_points(record.aligned_points)
-            before_axis.plot(before[:, 0], before[:, 1], color="#78A7FF", alpha=0.12, linewidth=0.8)
-            after_axis.plot(after[:, 0], after[:, 1], color="#78A7FF", alpha=0.12, linewidth=0.8)
+
+        # Migrate visualization to high-performance LineCollection arrays to prevent UI thread freezes
+        from matplotlib.collections import LineCollection
+        before_segments = [close_points(record.pre_procrustes_points) for record in self.results.records]
+        after_segments = [close_points(record.aligned_points) for record in self.results.records]
+
+        before_coll = LineCollection(before_segments, color="#78A7FF", alpha=0.12, linewidths=0.8)
+        after_coll = LineCollection(after_segments, color="#78A7FF", alpha=0.12, linewidths=0.8)
+
+        before_axis.add_collection(before_coll)
+        after_axis.add_collection(after_coll)
+
+        # Set manual limits because add_collection does not autoscale automatically
+        if before_segments:
+            all_before = np.concatenate(before_segments)
+            bx_min, by_min = all_before.min(axis=0)
+            bx_max, by_max = all_before.max(axis=0)
+            bx_range = max(bx_max - bx_min, 1e-5)
+            by_range = max(by_max - by_min, 1e-5)
+            before_axis.set_xlim(bx_min - 0.05 * bx_range, bx_max + 0.05 * bx_range)
+            before_axis.set_ylim(by_min - 0.05 * by_range, by_max + 0.05 * by_range)
+
+            all_after = np.concatenate(after_segments)
+            ax_min, ay_min = all_after.min(axis=0)
+            ax_max, ay_max = all_after.max(axis=0)
+            ax_range = max(ax_max - ax_min, 1e-5)
+            ay_range = max(ay_max - ay_min, 1e-5)
+            after_axis.set_xlim(ax_min - 0.05 * ax_range, ax_max + 0.05 * ax_range)
+            after_axis.set_ylim(ay_min - 0.05 * ay_range, ay_max + 0.05 * ay_range)
+
         mean_shape = close_points(self.results.mean_shape)
         after_axis.plot(mean_shape[:, 0], mean_shape[:, 1], color="#F5B041", linewidth=2.2, label="Mean Shape")
         after_axis.legend(facecolor=self.card_bg, edgecolor=self.border_color, labelcolor=self.fg_color, fontsize=8)

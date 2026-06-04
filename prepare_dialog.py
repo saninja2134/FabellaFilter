@@ -256,7 +256,7 @@ class AugRow(tk.Frame):
 
 class DatasetGeneratorModal(tk.Toplevel):
     # A Roboflow-inspired modal for configuring dataset generation and augmentation.
-    def __init__(self, parent, task="segment", on_generate=None):
+    def __init__(self, parent, task="segment", pos_sorted_dir="data/sorted/pos", on_generate=None):
         super().__init__(parent)
         self.title("Dataset Generation & Augmentation")
         self.geometry("780x880")
@@ -264,6 +264,7 @@ class DatasetGeneratorModal(tk.Toplevel):
         self.configure(bg=BG_COLOR)
         self.on_generate = on_generate
         self.task = task
+        self.pos_sorted_dir = pos_sorted_dir
 
         # Store control references
         self.ctrl = {}
@@ -539,7 +540,7 @@ class DatasetGeneratorModal(tk.Toplevel):
             mult = int(val.replace('x', '').split(' ')[0])
             # Estimate based on what's in the sorted folder
             import os
-            src = f"data/sorted/pos"
+            src = self.pos_sorted_dir
             n_src = len([f for f in os.listdir(src) if f.endswith('.png')]) if os.path.exists(src) else 0
             estimated = n_src * mult
             self.count_preview.config(text=f"Generating roughly {estimated:,} images  ({n_src:,} source × {mult}x multiplier)")

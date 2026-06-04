@@ -93,7 +93,7 @@ class PrepareProgressWindow(tk.Toplevel):
 class AutoLabelerConfigDialog(tk.Toplevel):
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("Auto-Label Model")
+        self.title("Auto-Label Model Setup")
         self.configure(bg=BG_COLOR)
         self.resizable(False, False)
         self.transient(parent)
@@ -161,6 +161,61 @@ class AutoLabelerConfigDialog(tk.Toplevel):
         )
         self.help_label.pack(anchor=tk.W, pady=(0, 12))
 
+        # ── Active Compute Limits Frame ──────────────────────────
+        compute_frame = tk.LabelFrame(
+            container,
+            text=" Active Compute Settings (Anti-Freeze) ",
+            bg=BG_COLOR,
+            fg=ACCENT_COLOR,
+            font=("Segoe UI", 9, "bold"),
+            padx=12,
+            pady=10,
+            relief=tk.GROOVE,
+        )
+        compute_frame.pack(fill=tk.X, pady=(0, 16))
+
+        self.throttle_var = tk.BooleanVar(value=True)
+        self.throttle_cb = tk.Checkbutton(
+            compute_frame,
+            text="Slow down processing while utilizing the PC",
+            variable=self.throttle_var,
+            bg=BG_COLOR,
+            fg=FG_COLOR,
+            selectcolor="#2D2D2D",
+            activebackground=BG_COLOR,
+            activeforeground=FG_COLOR,
+            command=self._sync_compute_state,
+            font=("Segoe UI", 9)
+        )
+        self.throttle_cb.pack(anchor=tk.W, pady=(0, 6))
+
+        settings_row = tk.Frame(compute_frame, bg=BG_COLOR)
+        settings_row.pack(fill=tk.X)
+
+        tk.Label(settings_row, text="Active Delay (s):", bg=BG_COLOR, fg=FG_COLOR, font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self.delay_var = tk.StringVar(value="1.5")
+        self.delay_entry = tk.Entry(
+            settings_row,
+            textvariable=self.delay_var,
+            width=6,
+            bg="#2D2D2D",
+            fg=FG_COLOR,
+            insertbackground=FG_COLOR,
+        )
+        self.delay_entry.pack(side=tk.LEFT, padx=(4, 15))
+
+        tk.Label(settings_row, text="Idle Timeout (s):", bg=BG_COLOR, fg=FG_COLOR, font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self.idle_timeout_var = tk.StringVar(value="5.0")
+        self.idle_timeout_entry = tk.Entry(
+            settings_row,
+            textvariable=self.idle_timeout_var,
+            width=6,
+            bg="#2D2D2D",
+            fg=FG_COLOR,
+            insertbackground=FG_COLOR,
+        )
+        self.idle_timeout_entry.pack(side=tk.LEFT, padx=(4, 0))
+
         btns = tk.Frame(container, bg=BG_COLOR)
         btns.pack(fill=tk.X)
         tk.Button(
@@ -185,6 +240,7 @@ class AutoLabelerConfigDialog(tk.Toplevel):
         ).pack(side=tk.RIGHT, padx=(0, 8))
 
         self._sync_threshold_state()
+        self._sync_compute_state()
 
     def _selected_option(self):
         idx = self.model_cb.current()
@@ -212,6 +268,11 @@ class AutoLabelerConfigDialog(tk.Toplevel):
                 text="SAM3 ignores the confidence threshold and runs segment-everything mode."
             )
 
+    def _sync_compute_state(self):
+        state = "normal" if self.throttle_var.get() else "disabled"
+        self.delay_entry.config(state=state)
+        self.idle_timeout_entry.config(state=state)
+
     def _on_confirm(self):
         selected = self._selected_option()
         if not selected:
@@ -233,10 +294,36 @@ class AutoLabelerConfigDialog(tk.Toplevel):
                 )
                 return
 
+        throttle_on_activity = self.throttle_var.get()
+        throttle_delay = 1.5
+        idle_timeout = 5.0
+
+        if throttle_on_activity:
+            try:
+                throttle_delay = float(self.delay_var.get())
+            except ValueError:
+                messagebox.showerror("Invalid Delay", "Active Delay must be numeric (seconds).", parent=self)
+                return
+            if throttle_delay < 0:
+                messagebox.showerror("Invalid Delay", "Active Delay cannot be negative.", parent=self)
+                return
+
+            try:
+                idle_timeout = float(self.idle_timeout_var.get())
+            except ValueError:
+                messagebox.showerror("Invalid Timeout", "Idle Timeout must be numeric (seconds).", parent=self)
+                return
+            if idle_timeout < 0:
+                messagebox.showerror("Invalid Timeout", "Idle Timeout cannot be negative.", parent=self)
+                return
+
         self.result = {
             "proposal_backend": selected["backend"],
             "proposal_model_path": selected["path"],
             "proposal_threshold": threshold,
+            "throttle_on_activity": throttle_on_activity,
+            "throttle_delay": throttle_delay,
+            "idle_timeout": idle_timeout,
         }
         self.destroy()
 
@@ -254,6 +341,22 @@ class FabellaApp:
         self.root.configure(bg=BG_COLOR)
         self._ui_task_queue = queue.SimpleQueue()
         self._ui_pump_job = None
+
+        # Folder selection variables with defaults
+        self.raw_dir_var = tk.StringVar(value="data/raw")
+        self.png_dir_var = tk.StringVar(value="data/png")
+        self.sorted_dir_var = tk.StringVar(value="data/sorted")
+        self.discarded_dir_var = tk.StringVar(value="data/discarded")
+        self.obb_label_dir_var = tk.StringVar(value="data/labels/obb")
+        self.seg_label_dir_var = tk.StringVar(value="data/labels/seg")
+
+        # Trace updates to refresh stats immediately when a folder is typed or browsed
+        self.raw_dir_var.trace_add("write", lambda *args: self._refresh_dataset_stats())
+        self.png_dir_var.trace_add("write", lambda *args: self._refresh_dataset_stats())
+        self.sorted_dir_var.trace_add("write", lambda *args: self._refresh_dataset_stats())
+        self.discarded_dir_var.trace_add("write", lambda *args: self._refresh_dataset_stats())
+        self.obb_label_dir_var.trace_add("write", lambda *args: self._refresh_dataset_stats())
+        self.seg_label_dir_var.trace_add("write", lambda *args: self._refresh_dataset_stats())
         
         # Header
         self.header_frame = tk.Frame(root, bg=BG_COLOR)
@@ -389,6 +492,16 @@ class FabellaApp:
         desc.pack(side=tk.LEFT, fill=tk.X)
         return btn
 
+    def _browse_dir(self, var, title):
+        from tkinter import filedialog
+        initial = var.get()
+        if not os.path.exists(initial):
+            initial = os.getcwd()
+        d = filedialog.askdirectory(parent=self.root, title=title, initialdir=initial)
+        if d:
+            var.set(os.path.normpath(d))
+            self._refresh_dataset_stats()
+
     def setup_dataset_tab(self):
         # Sets up the Dataset Tools tab.
         container = tk.Frame(self.tab_dataset, bg=BG_COLOR, padx=20, pady=20)
@@ -410,6 +523,56 @@ class FabellaApp:
                  justify=tk.LEFT, anchor=tk.W).pack(fill=tk.X, anchor=tk.W, pady=(4, 0))
 
         self.root.after(300, self._refresh_dataset_stats)
+
+        # ── Target Folders Configuration Section ─────────────────
+        cfg_frame = tk.Frame(container, bg="#252526", highlightbackground="#3E3E3E",
+                             highlightthickness=1, padx=12, pady=10)
+        cfg_frame.pack(fill=tk.X, pady=(0, 15))
+
+        tk.Label(cfg_frame, text="Folder Paths Configuration", font=("Segoe UI", 11, "bold"),
+                 bg="#252526", fg=ACCENT_COLOR).pack(anchor=tk.W, pady=(0, 10))
+
+        grid_frame = tk.Frame(cfg_frame, bg="#252526")
+        grid_frame.pack(fill=tk.X)
+
+        paths = [
+            ("Raw DICOM Base", self.raw_dir_var, "Select Raw DICOM Base Directory"),
+            ("Output PNG Base", self.png_dir_var, "Select Converted PNG Base Directory"),
+            ("Sorted Base", self.sorted_dir_var, "Select Sorted PNG Base Directory"),
+            ("Discarded Base", self.discarded_dir_var, "Select Discarded PNG Base Directory"),
+            ("OBB Labels Dir", self.obb_label_dir_var, "Select Oriented Bounding Box Labels Directory"),
+            ("Seg Labels Dir", self.seg_label_dir_var, "Select Segmentation Labels Directory"),
+        ]
+
+        for idx, (label_text, var, title) in enumerate(paths):
+            row = idx // 2
+            col_offset = 0 if idx % 2 == 0 else 3
+            
+            tk.Label(grid_frame, text=label_text + ":", bg="#252526", fg=FG_COLOR,
+                     font=("Segoe UI", 9)).grid(row=row, column=col_offset, padx=(5, 5), pady=5, sticky=tk.W)
+            
+            ent = tk.Entry(grid_frame, textvariable=var, width=32, bg="#3C3C3C", fg="white",
+                           insertbackground="white", relief=tk.FLAT)
+            ent.grid(row=row, column=col_offset+1, padx=(0, 5), pady=5, sticky=tk.EW)
+            
+            btn = tk.Button(
+                grid_frame,
+                text="Browse...",
+                font=("Segoe UI", 8),
+                bg=BUTTON_BG,
+                fg="white",
+                activebackground=BUTTON_ACTIVE,
+                activeforeground="white",
+                relief=tk.FLAT,
+                command=lambda v=var, t=title: self._browse_dir(v, t),
+                padx=8,
+                cursor="hand2"
+            )
+            btn.grid(row=row, column=col_offset+2, padx=(0, 15), pady=5)
+
+        # Make the Entry columns expandable
+        grid_frame.columnconfigure(1, weight=1)
+        grid_frame.columnconfigure(4, weight=1)
 
         self.heading(container, "1. Pre-Processing").pack(anchor=tk.W, pady=(0, 10))
         
@@ -606,25 +769,37 @@ class FabellaApp:
         thread.start()
 
     def run_dicom_conversion(self):
-        # Runs the DICOM to PNG conversion process.
-        converter = DicomConverter()
+        # Runs the DICOM to PNG conversion process with custom folders.
+        converter = DicomConverter(
+            base_dir=self.raw_dir_var.get(),
+            output_base=self.png_dir_var.get()
+        )
         self.run_in_thread(lambda: converter.run_conversion(progress_callback=self.log), "Converting DICOM files...")
 
     def run_cleaner(self):
-        # Opens the Dataset Cleaner window for positive images.
+        # Opens the Dataset Cleaner window for positive images with custom folders.
         self.set_status("Opening Dataset Cleaner...")
-        cleaner_window = FabellaCleaner(self.root)
+        cleaner_window = FabellaCleaner(
+            self.root,
+            input_base=self.png_dir_var.get(),
+            output_base=self.sorted_dir_var.get(),
+            discard_base=self.discarded_dir_var.get(),
+            category="pos"
+        )
         self.set_status("Ready")
 
     def run_neg_sorter(self):
-        # Opens the Dataset Cleaner window scoped to negative images.
-        # "Keep" = truly negative (no fabella) → data/sorted/neg
-        # "Discard" = actually has a fabella → data/sorted/pos
+        # Opens the Dataset Cleaner window scoped to negative images with custom folders.
+        # "Keep" = truly negative (no fabella) → Custom Sorted Base/neg
+        # "Discard" = actually has a fabella → Custom Sorted Base/pos
         self.set_status("Opening Negative Sorter...")
         FabellaCleaner(
             self.root,
+            input_base=self.png_dir_var.get(),
+            output_base=self.sorted_dir_var.get(),
+            discard_base=self.discarded_dir_var.get(),
             category="neg",
-            discard_dir_override="data/sorted/pos",
+            discard_dir_override=os.path.join(self.sorted_dir_var.get(), "pos"),
             keep_label="NO FABELLA →",
             discard_label="← HAS FABELLA",
             window_title="Negative Sorter — Has Fabella? Move to Pos"
@@ -632,21 +807,38 @@ class FabellaApp:
         self.set_status("Ready")
 
     def run_labeler(self):
-        # Runs the OBB Labeler tool (main thread — OpenCV GUI).
-        self._run_cv_tool(OBBLabeler(), "OBB Labeler")
+        # Runs the OBB Labeler tool with custom folders.
+        self._run_cv_tool(
+            OBBLabeler(
+                image_dir=os.path.join(self.sorted_dir_var.get(), "pos"),
+                label_dir=self.obb_label_dir_var.get()
+            ),
+            "OBB Labeler"
+        )
 
     def run_seg_labeler(self):
-        # Runs the Segmentation Labeler tool.
-        self._run_cv_tool(SegLabeler(), "Segmentation Labeler")
+        # Runs the Segmentation Labeler tool with custom folders.
+        self._run_cv_tool(
+            SegLabeler(
+                image_dir=os.path.join(self.sorted_dir_var.get(), "pos"),
+                label_dir=self.seg_label_dir_var.get()
+            ),
+            "Segmentation Labeler"
+        )
 
     def run_sam3_auto_labeler(self):
-        # Runs the model-assisted auto-labeler.
+        # Runs the model-assisted auto-labeler with custom folders.
         dialog = AutoLabelerConfigDialog(self.root)
         self.root.wait_window(dialog)
         if not dialog.result:
             return
 
-        labeler = SAM3AutoLabeler(**dialog.result)
+        params = dialog.result.copy()
+        params["image_dir"] = os.path.join(self.sorted_dir_var.get(), "pos")
+        params["label_dir"] = self.seg_label_dir_var.get()
+        params["parent"] = self.root
+
+        labeler = SAM3AutoLabeler(**params)
         tool_name = "RF-DETR Auto-Labeler" if labeler.proposal_backend == "rfdetr_seg" else "SAM3 Auto-Labeler"
         self._run_cv_tool(labeler, tool_name)
         backend_name = "RF-DETR Seg" if labeler.proposal_backend == "rfdetr_seg" else "SAM3"
@@ -671,20 +863,30 @@ class FabellaApp:
         def _count(d, ext=".png"):
             if not os.path.isdir(d):
                 return 0
-            return len([f for f in os.listdir(d) if f.lower().endswith(ext)])
+            try:
+                return len([f for f in os.listdir(d) if f.lower().endswith(ext)])
+            except Exception:
+                return 0
 
-        raw_pos   = _count("data/raw/pos", ".dcm")
-        raw_neg   = _count("data/raw/neg", ".dcm")
-        png_pos   = _count("data/png/pos")
-        png_neg   = _count("data/png/neg")
-        sort_pos  = _count("data/sorted/pos")
-        sort_neg  = _count("data/sorted/neg")
-        lbl_seg   = _count("data/labels/seg", ".txt")
-        lbl_obb   = _count("data/labels/obb", ".txt")
+        raw_pos   = _count(os.path.join(self.raw_dir_var.get(), "pos"), ".dcm")
+        raw_neg   = _count(os.path.join(self.raw_dir_var.get(), "neg"), ".dcm")
+        png_pos   = _count(os.path.join(self.png_dir_var.get(), "pos"))
+        png_neg   = _count(os.path.join(self.png_dir_var.get(), "neg"))
+        sort_pos  = _count(os.path.join(self.sorted_dir_var.get(), "pos"))
+        sort_neg  = _count(os.path.join(self.sorted_dir_var.get(), "neg"))
+        lbl_seg   = _count(self.seg_label_dir_var.get(), ".txt")
+        lbl_obb   = _count(self.obb_label_dir_var.get(), ".txt")
 
-        yolo_seg  = os.path.isfile("data/yolo/data_seg.yaml")
-        yolo_det  = os.path.isfile("data/yolo/data_det.yaml")
-        coco_ok   = os.path.isdir("data/coco/train")
+        # Scan for YOLO Seg/Det configurations and COCO
+        try:
+            base_parent = os.path.dirname(os.path.dirname(os.path.normpath(self.sorted_dir_var.get())))
+            yolo_seg  = os.path.isfile(os.path.join(base_parent, "yolo", "data_seg.yaml")) or os.path.isfile("data/yolo/data_seg.yaml")
+            yolo_det  = os.path.isfile(os.path.join(base_parent, "yolo", "data_det.yaml")) or os.path.isfile("data/yolo/data_det.yaml")
+            coco_ok   = os.path.isdir(os.path.join(base_parent, "coco", "train")) or os.path.isdir("data/coco/train")
+        except Exception:
+            yolo_seg  = os.path.isfile("data/yolo/data_seg.yaml")
+            yolo_det  = os.path.isfile("data/yolo/data_det.yaml")
+            coco_ok   = os.path.isdir("data/coco/train")
 
         parts = []
         parts.append(f"Raw DICOM:  {raw_pos} pos  |  {raw_neg} neg")
@@ -699,7 +901,10 @@ class FabellaApp:
         fmt_str = ", ".join(fmt_parts) if fmt_parts else "Not prepared"
         parts.append(f"Prepared:   {fmt_str}")
 
-        self.stats_label_var.set("\n".join(parts))
+        try:
+            self.stats_label_var.set("\n".join(parts))
+        except Exception:
+            pass
         
     def _on_arch_change(self, _event=None):
         # Update version and size dropdowns when architecture changes.
@@ -779,7 +984,17 @@ class FabellaApp:
             def run():
                 self.set_status(f"Preparing dataset (YOLO + COCO + Detection)...")
                 try:
-                    preparer = YoloPreparer(task=task)
+                    custom_label_dir = (
+                        self.obb_label_dir_var.get()
+                        if task == "obb"
+                        else self.seg_label_dir_var.get()
+                    )
+                    preparer = YoloPreparer(
+                        task=task,
+                        pos_img_dir=os.path.join(self.sorted_dir_var.get(), "pos"),
+                        neg_dicom_dir=os.path.join(self.raw_dir_var.get(), "neg"),
+                        label_dir=custom_label_dir
+                    )
                     preparer.setup_dataset(
                         config=config,
                         progress_callback=log_cb,
@@ -796,14 +1011,23 @@ class FabellaApp:
             t = threading.Thread(target=run, daemon=True)
             t.start()
 
-        DatasetGeneratorModal(self.root, task=task, on_generate=on_generate)
+        DatasetGeneratorModal(
+            self.root,
+            task=task,
+            pos_sorted_dir=os.path.join(self.sorted_dir_var.get(), "pos"),
+            on_generate=on_generate
+        )
 
     def run_train_model(self):
         # Trains the selected architecture.  RF-DETR logs to TensorBoard
         # automatically; YOLO logs to its own results.csv / plots.
         arch, version, size, epochs, imgsz, batch = self._get_arch_info()
-        trainer = ModelTrainer(arch=arch, version=version, size=size,
-                               epochs=epochs, imgsz=imgsz, batch=batch)
+        trainer = ModelTrainer(
+            arch=arch, version=version, size=size,
+            epochs=epochs, imgsz=imgsz, batch=batch,
+            pos_dir=os.path.join(self.sorted_dir_var.get(), "pos"),
+            neg_dir=os.path.join(self.sorted_dir_var.get(), "neg")
+        )
 
         os.makedirs(trainer.run_dir, exist_ok=True)
 
@@ -881,7 +1105,14 @@ class FabellaApp:
         arch  = entry.get("arch", "YOLO Seg")
         size  = entry.get("size", "n")
         weights = entry.get("weights_path", "")
-        tester = ModelTester(arch=arch, size=size)
+        
+        # Instantiate ModelTester with customized paths representing custom PNG and custom Sorted directory
+        tester = ModelTester(
+            arch=arch,
+            size=size,
+            src_dir=os.path.join(self.png_dir_var.get(), "pos"),
+            sorted_dir=os.path.join(self.sorted_dir_var.get(), "pos")
+        )
         if weights and os.path.exists(weights):
             tester.model_path = weights
         self.run_in_thread(

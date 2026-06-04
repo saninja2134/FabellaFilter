@@ -24,12 +24,13 @@ def _to_uint8(img):
 
 class YoloPreparer:
     # A class to prepare and split the dataset for YOLO model training.
-    def __init__(self, task="segment", pos_img_dir="data/sorted/pos", neg_dicom_dir="data/raw/neg"):
+    def __init__(self, task="segment", pos_img_dir="data/sorted/pos", neg_dicom_dir="data/raw/neg", label_dir=None):
         # Initializes the YoloPreparer.
         # Args:
         # task (str): The task type ('segment', 'obb', or 'detect').
         # pos_img_dir (str): Directory containing positive images.
         # neg_dicom_dir (str): Directory containing negative DICOM images.
+        # label_dir (str): Custom directory to load the label files from.
         self.task = task
         self.pos_img_dir = pos_img_dir
         # Detection uses segmentation polygon labels as source (bbox derived on write)
@@ -39,10 +40,22 @@ class YoloPreparer:
             task_key = 'det'
         else:
             task_key = 'seg'
-        self.label_dir = os.path.join('data', 'labels', 'obb' if task == 'obb' else 'seg')
+        
+        if label_dir is not None:
+            self.label_dir = label_dir
+        else:
+            self.label_dir = os.path.join('data', 'labels', 'obb' if task == 'obb' else 'seg')
+        
         self.neg_dicom_dir = neg_dicom_dir
-        self.base_output = os.path.join('data', 'yolo', task_key)
-        self.yaml_path = os.path.join('data', 'yolo', f'data_{task_key}.yaml')
+        
+        # Keep base_output and yaml_path relative to custom parent or default
+        try:
+            base_parent = os.path.dirname(os.path.dirname(os.path.normpath(pos_img_dir)))
+            self.base_output = os.path.join(base_parent, 'yolo', task_key)
+            self.yaml_path = os.path.join(base_parent, 'yolo', f'data_{task_key}.yaml')
+        except Exception:
+            self.base_output = os.path.join('data', 'yolo', task_key)
+            self.yaml_path = os.path.join('data', 'yolo', f'data_{task_key}.yaml')
 
     @staticmethod
     def _poly_to_bbox(coords):
