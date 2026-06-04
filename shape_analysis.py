@@ -242,8 +242,10 @@ def polygon_perimeter(points: np.ndarray) -> float:
 
 
 def pairwise_max_distance(points: np.ndarray) -> float:
-    diffs = points[:, None, :] - points[None, :, :]
-    return float(np.sqrt(np.sum(diffs * diffs, axis=2)).max())
+    if len(points) < 2:
+        return 0.0
+    from scipy.spatial.distance import pdist
+    return float(pdist(points).max())
 
 
 def rotate_points(points: np.ndarray, angle_deg: float, center: Optional[np.ndarray] = None) -> np.ndarray:
@@ -293,18 +295,11 @@ def resample_closed_contour(points: np.ndarray, num_points: int = RESAMPLE_POINT
         return points.copy()
     cumulative = np.concatenate([[0.0], np.cumsum(segment_lengths)])
     targets = np.linspace(0.0, cumulative[-1], num_points + 1)[:-1]
-    resampled: List[np.ndarray] = []
-    segment_index = 0
-    for target in targets:
-        while segment_index < len(segment_lengths) - 1 and cumulative[segment_index + 1] < target:
-            segment_index += 1
-        length = segment_lengths[segment_index]
-        if length <= 0:
-            resampled.append(closed[segment_index].copy())
-            continue
-        alpha = (target - cumulative[segment_index]) / length
-        resampled.append(closed[segment_index] * (1.0 - alpha) + closed[segment_index + 1] * alpha)
-    return np.asarray(resampled, dtype=float)
+
+    # Vectorized 1D linear interpolation
+    resampled_x = np.interp(targets, cumulative, closed[:, 0])
+    resampled_y = np.interp(targets, cumulative, closed[:, 1])
+    return np.column_stack([resampled_x, resampled_y])
 
 
 def reanchor_contour(points: np.ndarray) -> np.ndarray:
@@ -839,36 +834,48 @@ def permanova_euclidean(Y: np.ndarray, labels: Sequence[str], permutations: int 
     labels_array = np.asarray(labels)
     unique_labels = [label for label in sorted(set(labels_array)) if np.sum(labels_array == label) > 0]
     n_samples = len(labels_array)
+    g_count = len(unique_labels)
 
-    def compute_stats(current_labels: np.ndarray) -> Tuple[float, float]:
-        grand_mean = Y.mean(axis=0)
+    if g_count < 2 or n_samples <= g_count:
+        return {"pseudo_f": float("nan"), "r_squared": float("nan"), "p_value": float("nan")}
+
+    grand_mean = Y.mean(axis=0)
+    total = float(np.sum((Y - grand_mean) ** 2))
+    if total <= 0:
+        return {"pseudo_f": 0.0, "r_squared": 0.0, "p_value": 1.0}
+
+    # Precompute indices corresponding to each group to bypass expensive string matching inside permutation loop
+    label_to_indices = {label: np.where(labels_array == label)[0] for label in unique_labels}
+
+    def compute_between(shuffled_indices: np.ndarray) -> float:
         between = 0.0
-        within = 0.0
-        for label in unique_labels:
-            group = Y[current_labels == label]
-            if len(group) == 0:
+        for label, idxs in label_to_indices.items():
+            group_Y = Y[shuffled_indices[idxs]]
+            if len(group_Y) == 0:
                 continue
-            mean = group.mean(axis=0)
-            between += len(group) * float(np.sum((mean - grand_mean) ** 2))
-            within += float(np.sum((group - mean) ** 2))
-        total = between + within
-        if len(unique_labels) < 2 or within <= 0 or n_samples <= len(unique_labels):
-            return float("nan"), float("nan")
-        pseudo_f = (between / (len(unique_labels) - 1)) / (within / (n_samples - len(unique_labels)))
-        r_squared = between / total if total > 0 else float("nan")
-        return pseudo_f, r_squared
+            mean = group_Y.mean(axis=0)
+            between += len(group_Y) * np.sum((mean - grand_mean) ** 2)
+        return float(between)
 
-    observed_f, observed_r2 = compute_stats(labels_array)
-    if math.isnan(observed_f):
-        return {"pseudo_f": observed_f, "r_squared": observed_r2, "p_value": float("nan")}
+    # Calculate observed statistics
+    observed_between = compute_between(np.arange(n_samples))
+    observed_within = total - observed_between
+    if observed_within <= 0:
+        return {"pseudo_f": float("nan"), "r_squared": float("nan"), "p_value": float("nan")}
 
-    rng = np.random.default_rng(42)
+    observed_f = (observed_between / (g_count - 1)) / (observed_within / (n_samples - g_count))
+    observed_r2 = observed_between / total
+
+    # Perform permutation test of indices (mathematically equivalent and significantly faster than string shuffling)
     more_extreme = 1
+    rng = np.random.default_rng(42)
+    indices = np.arange(n_samples)
     for _ in range(permutations):
-        shuffled = rng.permutation(labels_array)
-        permuted_f, _ = compute_stats(shuffled)
-        if not math.isnan(permuted_f) and permuted_f >= observed_f:
+        rng.shuffle(indices)
+        perm_between = compute_between(indices)
+        if perm_between >= observed_between - 1e-10:
             more_extreme += 1
+
     p_value = more_extreme / float(permutations + 1)
     return {"pseudo_f": observed_f, "r_squared": observed_r2, "p_value": p_value}
 

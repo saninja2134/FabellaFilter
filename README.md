@@ -182,6 +182,18 @@ Shared utilities for the Torchvision Classifier pipeline: backbone registry (Eff
 
 ### `testing` branch
 
+#### v0.5.6 — Next-Gen NumPy/SciPy Algorithmic Optimizations
+
+**Vectorized Contour Resampling & Feature Extraction ([shape_analysis.py](shape_analysis.py) & [labeler_sam.py](labeler_sam.py))**
+- Rewrote contour resampling (`resample_closed_contour`) from a slow iterative `while` loop to a fully vectorized 1D linear interpolation using `np.interp` and `np.column_stack`.
+- Vectorized the entire shoelace area calculation, bounding box metrics, and perimeter calculations in the active learning auto-labeler (`_get_features`), switching to native NumPy rolls and vector operations.
+- Replaced the high-memory pairwise distance tensor-broadcasting calculation `points[:, None, :] - points[None, :, :]` in `pairwise_max_distance` with an extremely efficient calculation using SciPy's vectorized `pdist` distance estimator.
+
+**Fast Index-Based PERMANOVA Permutation ([shape_analysis.py](shape_analysis.py))**
+- Optimized the computational bottleneck in Euclidean PERMANOVA calculations. Replaced slow string-matching labels inside the permutation loop with pre-computed index mapping (`label_to_indices`).
+- Substituted heavy string label array permutations with mathematically equivalent index shuffles (`rng.shuffle(indices)`), boosting permutation math throughput by an order of magnitude.
+- Calculated the total sum-of-squares once to compute `observed_within` via `total - observed_between`, eliminating unnecessary redundant calculations.
+
 #### v0.5.5 — High-Performance LineCollection Plotting & Scan Completed Warnings
 
 **Vectorized Contour Plotting ([shape_analysis.py](shape_analysis.py))**

@@ -386,33 +386,29 @@ class SAM3AutoLabeler:
 
         Returns np.array([area, aspect_ratio, compactness, cx, cy])
         """
-        n = len(pts_norm)
+        arr = np.asarray(pts_norm, dtype=np.float64)
+        n = len(arr)
         if n < 3:
             return None
 
-        xs = [p[0] for p in pts_norm]
-        ys = [p[1] for p in pts_norm]
-        cx = sum(xs) / n
-        cy = sum(ys) / n
+        # Fully vectorized NumPy calculations
+        cx, cy = arr.mean(axis=0)
+        xs = arr[:, 0]
+        ys = arr[:, 1]
 
-        # Shoelace area
-        area = abs(sum(
-            pts_norm[i][0] * pts_norm[(i + 1) % n][1]
-            - pts_norm[(i + 1) % n][0] * pts_norm[i][1]
-            for i in range(n)
-        )) / 2.0
+        # Vectorized Shoelace area
+        x_next = np.roll(xs, -1)
+        y_next = np.roll(ys, -1)
+        area = 0.5 * abs(np.sum(xs * y_next - x_next * ys))
 
         # Bounding box aspect ratio
-        bw = max(xs) - min(xs)
-        bh = max(ys) - min(ys)
+        bw = float(xs.max() - xs.min())
+        bh = float(ys.max() - ys.min())
         aspect = bw / bh if bh > 1e-8 else 1.0
 
-        # Compactness = perimeter² / (4π · area) — 1.0 for a circle
-        perimeter = sum(
-            math.hypot(pts_norm[(i + 1) % n][0] - pts_norm[i][0],
-                       pts_norm[(i + 1) % n][1] - pts_norm[i][1])
-            for i in range(n)
-        )
+        # Vectorized perimeter calculation
+        diffs = arr - np.roll(arr, -1, axis=0)
+        perimeter = float(np.linalg.norm(diffs, axis=1).sum())
         compactness = (perimeter ** 2) / (4 * math.pi * area) if area > 1e-10 else 50.0
 
         return np.array([area, aspect, compactness, cx, cy], dtype=np.float64)
