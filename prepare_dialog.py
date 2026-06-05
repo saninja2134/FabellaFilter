@@ -523,7 +523,7 @@ class DatasetGeneratorModal(tk.Toplevel):
                 bg=SECTION_BG, fg=FG_COLOR).pack(side=tk.LEFT)
 
         self.multiplier_var = tk.StringVar(value="3x")
-        mult_values = ["1x (No Augmentation)", "2x", "3x", "5x", "10x"]
+        mult_values = ["Format Only (No Processing)", "1x (No Augmentation)", "2x", "3x", "5x", "10x"]
         mult_cb = ttk.Combobox(row, textvariable=self.multiplier_var,
                                values=mult_values, state='readonly', width=20)
         mult_cb.pack(side=tk.LEFT, padx=15)
@@ -552,6 +552,14 @@ class DatasetGeneratorModal(tk.Toplevel):
     def _update_count_label(self, event=None):
         val = self.multiplier_var.get()
         try:
+            if val.startswith("Format Only"):
+                import os
+                src = self.pos_sorted_dir
+                n_src = len([f for f in os.listdir(src) if f.endswith('.png')]) if os.path.exists(src) else 0
+                self.count_preview.config(text=f"Formatting {n_src:,} original images with no processing — YOLO + COCO output only")
+                if hasattr(self, 'count_label'):
+                    self.count_label.config(text=f"~{n_src:,} images")
+                return
             mult = int(val.replace('x', '').split(' ')[0])
             # Estimate based on what's in the sorted folder
             import os
@@ -583,7 +591,8 @@ class DatasetGeneratorModal(tk.Toplevel):
             return self.aug_rows[name].get_enabled()
 
         mult_str = self.multiplier_var.get()
-        multiplier = int(mult_str.replace('x', '').split(' ')[0])
+        format_only = mult_str.startswith("Format Only")
+        multiplier = 1 if format_only else int(mult_str.replace('x', '').split(' ')[0])
 
         config = {
             "preprocessing": {
@@ -651,6 +660,7 @@ class DatasetGeneratorModal(tk.Toplevel):
             },
             "generation": {
                 "multiplier": multiplier,
+                "format_only": format_only,
                 "preserve_originals": self.ctrl.get('preserve_originals', ToggleSwitch(None)).get() if 'preserve_originals' in self.ctrl else False,
             },
         }

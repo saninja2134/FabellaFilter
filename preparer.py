@@ -236,7 +236,8 @@ class YoloPreparer:
             # Apply preprocessing, convert to 8-bit JPEG (Roboflow-style compression).
             if img is None:
                 return
-            if config:
+            format_only = config.get('generation', {}).get('format_only', False) if config else False
+            if config and not format_only:
                 img, labels = augmentation.apply_preprocessing_with_labels(img, labels, config)
             img = _to_uint8(img)
             img_dst = os.path.join(self.base_output, split, 'images', fname)
@@ -263,6 +264,7 @@ class YoloPreparer:
 
         def process_samples(samples, split):
             preserve = config.get('generation', {}).get('preserve_originals', False) if config else False
+            format_only = config.get('generation', {}).get('format_only', False) if config else False
             for img_path, lbl_path in samples:
                 stem = os.path.splitext(os.path.basename(img_path))[0]
                 # Load image and its matching labels together so transforms stay in sync
@@ -288,8 +290,8 @@ class YoloPreparer:
                                    original_source=os.path.basename(img_path),
                                    is_augmented=False)
 
-                # Augmented copies (positive samples only, when multiplier > 1)
-                if lbl_path and config and multiplier > 1:
+                # Augmented copies (positive samples only, when multiplier > 1 and not format_only)
+                if lbl_path and config and multiplier > 1 and not format_only:
                     for k in range(1, multiplier):
                         # Re-read originals so each augmentation is independent
                         aug_img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
