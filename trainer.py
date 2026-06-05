@@ -842,6 +842,7 @@ class ModelTrainer:
     def _train_nnunet(self, log):
         """Train a nnU-Net v2 self-configuring U-Net on the fabella dataset."""
         import subprocess
+        import json as _json
 
         # Locate CLI tools
         try:
@@ -865,6 +866,10 @@ class ModelTrainer:
             "nnUNet_raw":          raw_dir,
             "nnUNet_preprocessed": preprocessed_dir,
             "nnUNet_results":      results_dir,
+            # Allow Python to find the custom trainer in the project root
+            "PYTHONPATH": os.pathsep.join(
+                filter(None, [os.path.abspath("."), os.environ.get("PYTHONPATH", "")])
+            ),
         }
 
         dataset_dir = os.path.join(raw_dir, NNUNET_DATASET_NAME)
@@ -890,13 +895,57 @@ class ModelTrainer:
             log(f"[nnU-Net] Preprocessing failed:\n{result.stderr[-2000:]}")
             return
 
-        # Step 3: Train fold 0
-        # nnU-Net self-configures patch size, batch size, and architecture from data
-        # statistics; epochs default to 1 000 and cannot be overridden via CLI alone.
-        log(f"\n[nnU-Net] Training '{self.size}' — fold 0 "
-            f"(nnU-Net self-configures epoch count, default 1 000)…")
+        # Step 3: Patch nnUNetPlans.json for small-object detection
+        # nnU-Net auto-configures conservatively; for a tiny fabella on a large
+        # radiograph we need a large patch_size and sufficient batch_size.
+        patch_size = max(int(self.imgsz), 512)  # at least 512; user can set higher
+        plans_path = os.path.join(
+            preprocessed_dir, NNUNET_DATASET_NAME, "nnUNetPlans.json"
+        )
+        if os.path.exists(plans_path):
+            try:
+                with open(plans_path, encoding="utf-8") as f:
+                    plans = _json.load(f)
+                config_key = self.size
+                if config_key in plans.get("configurations", {}):
+                    cfg = plans["configurations"][config_key]
+                    original_patch = cfg.get("patch_size", [])
+                    # Apply large patch size so the receptive field covers the full image
+                    if len(original_patch) == 2:
+                        cfg["patch_size"] = [patch_size, patch_size]
+                    elif len(original_patch) == 3:
+                        cfg["patch_size"] = [patch_size, patch_size, patch_size]
+                    # Increase batch size for better small-object gradient signal
+                    cfg["batch_size"] = max(cfg.get("batch_size", 2), 16)
+                    # Ensure enough pooling stages for the larger patch
+                    n_pool = max(int(patch_size).bit_length() - 3, 5)
+                    if "n_conv_per_stage_encoder" not in cfg:
+                        cfg["n_conv_per_stage_encoder"] = [2] * (n_pool + 1)
+                    if "n_conv_per_stage_decoder" not in cfg:
+                        cfg["n_conv_per_stage_decoder"] = [2] * n_pool
+                    plans["configurations"][config_key] = cfg
+                    with open(plans_path, "w", encoding="utf-8") as f:
+                        _json.dump(plans, f, indent=4)
+                    log(f"[nnU-Net] Patched nnUNetPlans.json: "
+                        f"patch_size={patch_size}×{patch_size}, "
+                        f"batch_size={cfg['batch_size']}")
+                else:
+                    log(f"[nnU-Net] Warning: config '{config_key}' not found in plans — using nnU-Net defaults.")
+            except Exception as patch_err:
+                log(f"[nnU-Net] Warning: could not patch plans file: {patch_err}")
+        else:
+            log(f"[nnU-Net] Warning: plans file not found at {plans_path} — using nnU-Net defaults.")
+
+        # Step 4: Train fold 0 using the custom Fabella trainer
+        # nnUNetTrainerFabella adds 50% foreground oversampling and Compound Focal+Dice loss.
+        log(f"\n[nnU-Net] Training '{self.size}' — fold 0 with nnUNetTrainerFabella…")
+        log(f"  Equivalent CLI: nnUNetv2_train {NNUNET_DATASET_ID} {self.size} 0 "
+            f"--trainer nnUNetTrainerFabella -p nnUNetPlans --npz")
         result = subprocess.run(
-            [train_cmd, str(NNUNET_DATASET_ID), self.size, "0", "--npz"],
+            [train_cmd, str(NNUNET_DATASET_ID), self.size, "0",
+             "--trainer", "nnUNetTrainerFabella",
+             "-p", "nnUNetPlans",
+             "--npz"],
             text=True, capture_output=True, env=env,
         )
         for line in (result.stdout or "").splitlines()[-120:]:

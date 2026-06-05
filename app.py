@@ -682,9 +682,9 @@ class FabellaApp:
                  bg="#2D2D2D", fg=FG_COLOR, insertbackground=FG_COLOR).grid(
             row=1, column=5, padx=5, pady=5)
 
-        # ── Row 2: Img size ─────────────────────────────────────
-        tk.Label(settings_frame, text="Img Size:", bg=BG_COLOR, fg=FG_COLOR).grid(
-            row=2, column=0, padx=5, pady=5, sticky=tk.W)
+        # ── Row 2: Img size / Patch size ────────────────────────
+        self.imgsz_label = tk.Label(settings_frame, text="Img Size:", bg=BG_COLOR, fg=FG_COLOR)
+        self.imgsz_label.grid(row=2, column=0, padx=5, pady=5, sticky=tk.W)
         self.imgsz_var = tk.StringVar(value="1024")
         tk.Entry(settings_frame, textvariable=self.imgsz_var, width=7,
                  bg="#2D2D2D", fg=FG_COLOR, insertbackground=FG_COLOR).grid(
@@ -925,6 +925,13 @@ class FabellaApp:
 
         self.size_cb.config(values=sizes)
         self.size_var.set(sizes[0])
+
+        # Relabel the img-size field so it's clear it controls patch size for nnU-Net
+        if arch == "nnU-Net":
+            self.imgsz_label.config(text="Patch Size:")
+        else:
+            self.imgsz_label.config(text="Img Size:")
+
         self._on_size_change()
 
     def _on_size_change(self, _event=None):
@@ -935,6 +942,8 @@ class FabellaApp:
                 self.imgsz_var.set(str(default_imgsz_for_backbone(backbone)))
             except Exception:
                 self.imgsz_var.set("384")
+        elif arch == "nnU-Net":
+            self.imgsz_var.set("1024")
 
     def _get_arch_info(self):
         # Returns (arch, version, size, epochs, imgsz, batch) from current UI state.
