@@ -262,13 +262,28 @@ class YoloPreparer:
                 csv_rows.append([split, rel_img, '', '', '', is_augmented, original_source])
 
         def process_samples(samples, split):
+            preserve = config.get('generation', {}).get('preserve_originals', False) if config else False
             for img_path, lbl_path in samples:
                 stem = os.path.splitext(os.path.basename(img_path))[0]
                 # Load image and its matching labels together so transforms stay in sync
                 img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
                 labels = augmentation.read_labels(lbl_path) if lbl_path else None
 
-                # Original copy (no augmentation)
+                # Preserve original: write raw source pixels with no preprocessing applied
+                if preserve:
+                    raw_img = _to_uint8(img.copy()) if img is not None else None
+                    if raw_img is not None:
+                        raw_fname = stem + '_orig.jpg'
+                        raw_img_dst = os.path.join(self.base_output, split, 'images', raw_fname)
+                        cv2.imwrite(raw_img_dst, raw_img, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+                        if labels:
+                            raw_lbl_dst = os.path.join(self.base_output, split, 'labels', stem + '_orig.txt')
+                            if self.task == 'detect':
+                                augmentation.write_labels(raw_lbl_dst, [(cid, self._poly_to_bbox(coords)) for cid, coords in labels])
+                            else:
+                                augmentation.write_labels(raw_lbl_dst, labels)
+
+                # Preprocessed original copy (no augmentation)
                 write_sample_files(img, labels, split, stem + '.jpg',
                                    original_source=os.path.basename(img_path),
                                    is_augmented=False)

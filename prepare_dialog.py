@@ -534,6 +534,21 @@ class DatasetGeneratorModal(tk.Toplevel):
         self.count_preview.pack(anchor='w', pady=(6, 0))
         self._update_count_label()
 
+        # Preserve Originals toggle
+        sep = tk.Frame(parent, bg=BORDER_COLOR, height=1)
+        sep.pack(fill=tk.X, pady=(12, 8))
+        preserve_row = tk.Frame(parent, bg=SECTION_BG)
+        preserve_row.pack(fill=tk.X, pady=4)
+        preserve_toggle = ToggleSwitch(preserve_row, initial=False)
+        preserve_toggle.pack(side=tk.LEFT)
+        col = tk.Frame(preserve_row, bg=SECTION_BG)
+        col.pack(side=tk.LEFT, padx=12)
+        tk.Label(col, text="Preserve Originals", font=('Segoe UI', 10, 'bold'),
+                bg=SECTION_BG, fg=FG_COLOR).pack(anchor='w')
+        tk.Label(col, text="Include one raw unprocessed copy of every source image alongside augmented versions.",
+                font=('Segoe UI', 9), bg=SECTION_BG, fg='#888888').pack(anchor='w')
+        self.ctrl['preserve_originals'] = preserve_toggle
+
     def _update_count_label(self, event=None):
         val = self.multiplier_var.get()
         try:
@@ -636,6 +651,7 @@ class DatasetGeneratorModal(tk.Toplevel):
             },
             "generation": {
                 "multiplier": multiplier,
+                "preserve_originals": self.ctrl.get('preserve_originals', ToggleSwitch(None)).get() if 'preserve_originals' in self.ctrl else False,
             },
         }
         return config
