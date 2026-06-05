@@ -1,7 +1,12 @@
 """Custom nnU-Net v2 trainer for small-object fabella detection on knee radiographs.
 
-Place this file in the project root so the ``PYTHONPATH`` entry added by the
-training pipeline makes it discoverable by ``nnUNetv2_train -tr nnUNetTrainerFabella``.
+nnU-Net's CLI only discovers trainers that live inside the installed package at
+``nnunetv2/training/nnUNetTrainer/``.  The training pipeline in ``trainer.py``
+automatically copies this file there (renaming it ``nnUNetTrainerFabella.py``)
+before invoking ``nnUNetv2_train``.  You can also install it manually:
+
+    cp nnunet_trainer_fabella.py \\
+       $(python -c "import nnunetv2.training.nnUNetTrainer as p; import os; print(os.path.dirname(p.__file__))")/nnUNetTrainerFabella.py
 
 Differences from nnUNetTrainer
 --------------------------------
@@ -68,7 +73,7 @@ except ImportError:
         """Stub — install nnunetv2 to use this trainer: pip install nnunetv2"""
         pass
 
-
+"""
 Differences from the default nnUNetTrainer
 -------------------------------------------
 * Foreground oversampling raised to 0.50 (50 % of patches contain the fabella).

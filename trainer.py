@@ -931,7 +931,23 @@ class ModelTrainer:
         else:
             log(f"[nnU-Net] Warning: plans file not found at {plans_path} — using nnU-Net defaults.")
 
-        # Step 4: Train fold 0 with custom Fabella trainer
+        # Step 4: Install custom trainer into nnU-Net's trainer directory so the
+        # CLI can discover it. nnUNetv2_train only searches the installed package
+        # path; PYTHONPATH additions are not scanned.
+        trainer_src = os.path.join(os.path.abspath("."), "nnunet_trainer_fabella.py")
+        try:
+            import nnunetv2.training.nnUNetTrainer as _nnunet_trainer_pkg
+            nnunet_trainer_dir = os.path.dirname(_nnunet_trainer_pkg.__file__)
+            trainer_dst = os.path.join(nnunet_trainer_dir, "nnUNetTrainerFabella.py")
+            import shutil as _shutil
+            _shutil.copy2(trainer_src, trainer_dst)
+            log(f"[nnU-Net] Installed custom trainer → {trainer_dst}")
+        except Exception as install_err:
+            log(f"[nnU-Net] Warning: could not auto-install trainer: {install_err}")
+            log(f"  Manual fix: copy nnunet_trainer_fabella.py into your nnunetv2 "
+                f"training/nnUNetTrainer/ directory and rename it nnUNetTrainerFabella.py")
+
+        # Step 5: Train fold 0 with custom Fabella trainer
         # -tr flag (not --trainer) is the correct nnUNetv2_train CLI syntax
         log(f"\n[nnU-Net] Training '{self.size}' — fold 0 with nnUNetTrainerFabella…")
         log(f"  CLI: nnUNetv2_train {NNUNET_DATASET_ID} {self.size} 0 "
