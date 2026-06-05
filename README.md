@@ -182,6 +182,16 @@ Shared utilities for the Torchvision Classifier pipeline: backbone registry (Eff
 
 ### `testing` branch
 
+#### v0.5.7 — nnU-Net v2 Training & Inference Backend
+
+**nnU-Net Architecture Integration ([trainer.py](trainer.py) & [tester.py](tester.py))**
+- Added `"nnU-Net"` as a fully-supported architecture in `ARCHITECTURES`, supporting configurations `2d`, `3d_fullres`, and `3d_lowres`. The `2d` configuration is the recommended option for 2D X-ray fabella segmentation.
+- Implemented `_train_nnunet()` in `ModelTrainer`: automatically sets `nnUNet_raw`, `nnUNet_preprocessed`, and `nnUNet_results` environment variables, converts the YOLO polygon label dataset to the nnU-Net v2 format, runs `nnUNetv2_plan_and_preprocess` for self-configuring patch/batch/architecture tuning, and then trains fold 0 via `nnUNetv2_train`.
+- Implemented `_prepare_nnunet_dataset()`: converts every labeled positive PNG + YOLO `.txt` segmentation polygon pair into nnU-Net's `imagesTr/CASE_0000.png` + `labelsTr/CASE.png` binary mask layout. Writes `dataset.json` (channel/label metadata) and `case_id_map.json` (original filename traceability map) to the dataset directory.
+- Implemented `_test_nnunet()` in `ModelTester`: formats test images into nnU-Net naming convention, runs `nnUNetv2_predict` via subprocess with the correct environment, overlays green predicted masks on detected images, and routes results to `detected/` or `undetected/`.
+- Added `NNUNET_DATASET_ID = 1` and `NNUNET_DATASET_NAME` constants shared between trainer and tester for consistent dataset identity.
+- Updated `ModelRegistry._infer_from_name()` and `_make_registry_entry()` to correctly resolve nnU-Net checkpoint paths (`nnUNetTrainer__nnUNetPlans__CONFIG/fold_0/checkpoint_best.pth`).
+
 #### v0.5.6 — Next-Gen NumPy/SciPy Algorithmic Optimizations
 
 **Vectorized Contour Resampling & Feature Extraction ([shape_analysis.py](shape_analysis.py) & [labeler_sam.py](labeler_sam.py))**

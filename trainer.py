@@ -113,6 +113,7 @@ class ModelRegistry:
             "rf_detr":     "RF-DETR",
             "rf_detr_seg": "RF-DETR Seg",
             "torchvision_classifier": CLASSIFIER_ARCH,
+            "nn_u_net":    "nnU-Net",
         }
         return arch_map.get(arch_key, arch_key), size
 
@@ -170,6 +171,13 @@ ARCHITECTURES = {
         ],
         "versions": [""],
     },
+    "nnU-Net": {
+        "backend":  "nnunet",
+        "task":     "segment",
+        "format":   "nnunet",
+        "sizes":    ["2d", "3d_fullres", "3d_lowres"],
+        "versions": [""],
+    },
 }
 
 
@@ -215,6 +223,10 @@ RFDETR_SEG_LOSS_KWARGS = {
     "mask_dice_loss_coef": 5.0,
     "cls_loss_coef": 5.0,
 }
+
+# nnU-Net dataset identity (shared by trainer + tester)
+NNUNET_DATASET_ID   = 1
+NNUNET_DATASET_NAME = f"Dataset{NNUNET_DATASET_ID:03d}_Fabella"
 
 
 def get_rfdetr_class(task, size):
@@ -321,6 +333,8 @@ class ModelTrainer:
             self._train_rfdetr(log)
         elif self.backend == "torchvision":
             self._train_torchvision_classifier(log)
+        elif self.backend == "nnunet":
+            self._train_nnunet(log)
         else:
             log(f"Unknown backend: {self.backend}")
 
@@ -776,6 +790,12 @@ class ModelTrainer:
             weights = self._find_rfdetr_best(run_dir)
         elif self.backend == "torchvision":
             weights = os.path.join(run_dir, "best_classifier.pth")
+        elif self.backend == "nnunet":
+            weights = os.path.join(
+                "output", "nnunet_results", NNUNET_DATASET_NAME,
+                f"nnUNetTrainer__nnUNetPlans__{self.size}",
+                "fold_0", "checkpoint_best.pth",
+            )
         else:
             weights = os.path.join(run_dir, "weights", "best.pt")
         return {
@@ -800,3 +820,172 @@ class ModelTrainer:
             if os.path.exists(p):
                 return p
         return os.path.join(run_dir, "checkpoint_best_ema.pth")  # fallback
+
+    # ── nnU-Net backend ───────────────────────────────────────────
+
+    @staticmethod
+    def _find_nnunet_cmd(name: str) -> str:
+        """Locate an nnU-Net v2 CLI entry point, raising FileNotFoundError if absent."""
+        import shutil
+        found = shutil.which(name)
+        if found:
+            return found
+        # Also search the same scripts directory as the active interpreter
+        candidate = os.path.join(os.path.dirname(sys.executable), name)
+        if os.path.isfile(candidate):
+            return candidate
+        raise FileNotFoundError(
+            f"nnU-Net CLI '{name}' not found.\n"
+            f"Install with:  pip install nnunetv2"
+        )
+
+    def _train_nnunet(self, log):
+        """Train a nnU-Net v2 self-configuring U-Net on the fabella dataset."""
+        import subprocess
+
+        # Locate CLI tools
+        try:
+            plan_cmd  = self._find_nnunet_cmd("nnUNetv2_plan_and_preprocess")
+            train_cmd = self._find_nnunet_cmd("nnUNetv2_train")
+        except FileNotFoundError as err:
+            log(str(err))
+            return
+
+        # Build directory paths and nnU-Net environment variables
+        try:
+            base_parent = os.path.dirname(os.path.dirname(os.path.normpath(self.pos_dir)))
+        except Exception:
+            base_parent = "data"
+        nnunet_base      = os.path.abspath(os.path.join(base_parent, "nnunet"))
+        raw_dir          = os.path.join(nnunet_base, "nnUNet_raw")
+        preprocessed_dir = os.path.join(nnunet_base, "nnUNet_preprocessed")
+        results_dir      = os.path.abspath(os.path.join("output", "nnunet_results"))
+        env = {
+            **os.environ,
+            "nnUNet_raw":          raw_dir,
+            "nnUNet_preprocessed": preprocessed_dir,
+            "nnUNet_results":      results_dir,
+        }
+
+        dataset_dir = os.path.join(raw_dir, NNUNET_DATASET_NAME)
+
+        # Step 1: Convert YOLO polygon labels → nnU-Net dataset format
+        log("Preparing nnU-Net dataset from YOLO segmentation labels…")
+        n_cases = self._prepare_nnunet_dataset(dataset_dir, base_parent, log)
+        if n_cases == 0:
+            log("Error: no labeled training images found. Label positive images first.")
+            return
+
+        # Step 2: Plan and preprocess
+        log(f"\n[nnU-Net] Planning and preprocessing {n_cases} cases "
+            f"(configuration: {self.size})…")
+        result = subprocess.run(
+            [plan_cmd, "-d", str(NNUNET_DATASET_ID),
+             "--verify_dataset_integrity", "-c", self.size],
+            text=True, capture_output=True, env=env,
+        )
+        for line in (result.stdout or "").splitlines()[-80:]:
+            log(line)
+        if result.returncode != 0:
+            log(f"[nnU-Net] Preprocessing failed:\n{result.stderr[-2000:]}")
+            return
+
+        # Step 3: Train fold 0
+        # nnU-Net self-configures patch size, batch size, and architecture from data
+        # statistics; epochs default to 1 000 and cannot be overridden via CLI alone.
+        log(f"\n[nnU-Net] Training '{self.size}' — fold 0 "
+            f"(nnU-Net self-configures epoch count, default 1 000)…")
+        result = subprocess.run(
+            [train_cmd, str(NNUNET_DATASET_ID), self.size, "0", "--npz"],
+            text=True, capture_output=True, env=env,
+        )
+        for line in (result.stdout or "").splitlines()[-120:]:
+            log(line)
+        if result.returncode != 0:
+            log(f"[nnU-Net] Training failed:\n{result.stderr[-2000:]}")
+            return
+
+        log("\n[nnU-Net] Training complete!")
+        ModelRegistry.register(self._make_registry_entry())
+
+    def _prepare_nnunet_dataset(self, dataset_dir: str, base_parent: str, log) -> int:
+        """Convert YOLO seg labels + sorted PNG images to nnU-Net v2 dataset layout.
+
+        Directory layout produced::
+
+            dataset_dir/
+              dataset.json          ← channel/label metadata
+              case_id_map.json      ← maps nnU-Net case IDs back to original filenames
+              imagesTr/
+                fabella_0000_0000.png   ← channel-0 grayscale X-ray
+                ...
+              labelsTr/
+                fabella_0000.png        ← binary mask (0=background, 1=fabella)
+                ...
+
+        Returns the number of training cases written.
+        """
+        import cv2
+        import json
+        import numpy as np
+
+        images_tr = os.path.join(dataset_dir, "imagesTr")
+        labels_tr = os.path.join(dataset_dir, "labelsTr")
+        os.makedirs(images_tr, exist_ok=True)
+        os.makedirs(labels_tr, exist_ok=True)
+
+        label_dir = os.path.join(base_parent, "labels", "seg")
+        id_map: dict = {}
+        count = 0
+
+        for fname in sorted(os.listdir(self.pos_dir)):
+            if not fname.lower().endswith(".png"):
+                continue
+            stem = os.path.splitext(fname)[0]
+            label_path = os.path.join(label_dir, stem + ".txt")
+            if not os.path.exists(label_path):
+                continue
+
+            img = cv2.imread(os.path.join(self.pos_dir, fname), cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                continue
+            h, w = img.shape
+
+            # Convert YOLO normalised polygon to filled binary mask
+            mask = np.zeros((h, w), dtype=np.uint8)
+            with open(label_path, encoding="utf-8") as fh:
+                for line in fh:
+                    parts = line.strip().split()
+                    if len(parts) < 7:
+                        continue
+                    coords = [float(v) for v in parts[1:]]
+                    pts = np.array(
+                        [(int(coords[i] * w), int(coords[i + 1] * h))
+                         for i in range(0, len(coords) - 1, 2)],
+                        dtype=np.int32,
+                    )
+                    cv2.fillPoly(mask, [pts], 1)
+
+            case_id = f"fabella_{count:04d}"
+            cv2.imwrite(os.path.join(images_tr, f"{case_id}_0000.png"), img)
+            cv2.imwrite(os.path.join(labels_tr, f"{case_id}.png"), mask)
+            id_map[case_id] = fname
+            count += 1
+
+        if count == 0:
+            return 0
+
+        dataset_json = {
+            "channel_names": {"0": "X-ray"},
+            "labels": {"background": 0, "fabella": 1},
+            "numTraining": count,
+            "file_ending": ".png",
+        }
+        with open(os.path.join(dataset_dir, "dataset.json"), "w") as f:
+            json.dump(dataset_json, f, indent=2)
+        # Store original filename mapping for traceability
+        with open(os.path.join(dataset_dir, "case_id_map.json"), "w") as f:
+            json.dump(id_map, f, indent=2)
+
+        log(f"  Prepared {count} training cases → {images_tr}")
+        return count

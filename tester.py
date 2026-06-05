@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import os
 import shutil
-from trainer import ARCHITECTURES, get_arch_info, get_rfdetr_class
+from trainer import ARCHITECTURES, NNUNET_DATASET_ID, NNUNET_DATASET_NAME, get_arch_info, get_rfdetr_class
 from classifier_utils import (
     DEFAULT_AUTO_POSITIVE_THRESHOLD,
     DEFAULT_REVIEW_THRESHOLD,
@@ -30,6 +30,12 @@ class ModelTester:
         self.run_name  = f"fabella_{safe_arch}_{size}_v1"
         if self.task == "classify":
             self.model_path = os.path.join("output", "runs", self.run_name, "best_classifier.pth")
+        elif self.backend == "nnunet":
+            self.model_path = os.path.join(
+                "output", "nnunet_results", NNUNET_DATASET_NAME,
+                f"nnUNetTrainer__nnUNetPlans__{size}",
+                "fold_0", "checkpoint_best.pth",
+            )
         else:
             self.model_path = os.path.join("output/runs", self.run_name, "weights", "best.pt")
         self.output_dir = f"output/test_{safe_arch}_{size}"
@@ -40,11 +46,11 @@ class ModelTester:
             if progress_callback: progress_callback(msg)
 
         # Try .pt then .pth for RF-DETR checkpoints
-        if not os.path.exists(self.model_path) and self.task != "classify":
+        if not os.path.exists(self.model_path) and self.task != "classify" and self.backend != "nnunet":
             alt = self.model_path.replace(".pt", ".pth")
             if os.path.exists(alt):
                 self.model_path = alt
-        if not os.path.exists(self.model_path):
+        if not os.path.exists(self.model_path) and self.backend != "nnunet":
             log(f"Error: model not found at {self.model_path}")
             return
 
@@ -97,6 +103,8 @@ class ModelTester:
             self._test_ultralytics(unsorted, det_dir, undet_dir, log)
         elif self.backend == "rfdetr":
             self._test_rfdetr(unsorted, det_dir, undet_dir, log)
+        elif self.backend == "nnunet":
+            self._test_nnunet(unsorted, det_dir, undet_dir, log)
 
         log(f"\nTest complete!")
         log(f"Detected:   {len(os.listdir(det_dir))}")
@@ -314,3 +322,75 @@ class ModelTester:
         ry = int(np.mean(pts[:, 1]))
         cv2.putText(img, text, (rx + 15, ry),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+    def _test_nnunet(self, batch, det_dir, undet_dir, log):
+        """Run nnU-Net v2 inference and sort images by whether the fabella was detected."""
+        import subprocess
+        import shutil
+        import tempfile
+
+        # Locate nnUNetv2_predict
+        predict_cmd = shutil.which("nnUNetv2_predict") or os.path.join(
+            os.path.dirname(os.path.abspath(__import__("sys").executable)), "nnUNetv2_predict"
+        )
+        if not os.path.isfile(predict_cmd or ""):
+            log("Error: 'nnUNetv2_predict' not found. Install with: pip install nnunetv2")
+            return
+
+        nnunet_base = os.path.abspath(os.path.join("data", "nnunet"))
+        env = {
+            **os.environ,
+            "nnUNet_raw":          os.path.join(nnunet_base, "nnUNet_raw"),
+            "nnUNet_preprocessed": os.path.join(nnunet_base, "nnUNet_preprocessed"),
+            "nnUNet_results":      os.path.abspath(os.path.join("output", "nnunet_results")),
+        }
+
+        with tempfile.TemporaryDirectory() as tmp_in, tempfile.TemporaryDirectory() as tmp_out:
+            # Write images in nnU-Net naming convention (CASE_0000.png = channel 0)
+            stem_map: dict = {}
+            for idx, img_name in enumerate(batch):
+                img = cv2.imread(os.path.join(self.src_dir, img_name), cv2.IMREAD_GRAYSCALE)
+                if img is None:
+                    continue
+                case_id = f"test_{idx:04d}"
+                cv2.imwrite(os.path.join(tmp_in, f"{case_id}_0000.png"), img)
+                stem_map[case_id] = img_name
+
+            if not stem_map:
+                log("Error: no readable images found.")
+                return
+
+            log(f"[nnU-Net] Running inference on {len(stem_map)} images…")
+            result = subprocess.run(
+                [predict_cmd,
+                 "-i", tmp_in, "-o", tmp_out,
+                 "-d", str(NNUNET_DATASET_ID),
+                 "-c", self.size,
+                 "-f", "0"],
+                text=True, capture_output=True, env=env,
+            )
+            for line in (result.stdout or "").splitlines()[-60:]:
+                log(line)
+            if result.returncode != 0:
+                log(f"[nnU-Net] Predict error:\n{result.stderr[-1500:]}")
+                return
+
+            # Evaluate predictions — sort images into detected / undetected
+            for case_id, img_name in stem_map.items():
+                img_visual = self._prep_visual(os.path.join(self.src_dir, img_name))
+                if img_visual is None:
+                    continue
+                mask_path = os.path.join(tmp_out, f"{case_id}.png")
+                has_det = False
+                if os.path.exists(mask_path):
+                    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                    if mask is not None and mask.max() > 0:
+                        has_det = True
+                        # Overlay predicted mask with green tint
+                        overlay = img_visual.copy()
+                        overlay[mask > 0] = (
+                            overlay[mask > 0] * np.float32(0.55)
+                            + np.array([0, 220, 0], dtype=np.float32) * 0.45
+                        ).astype(np.uint8)
+                        img_visual = overlay
+                self._save(img_visual, has_det, img_name, det_dir, undet_dir)
